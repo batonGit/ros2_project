@@ -1,0 +1,15 @@
+# ROS2 и colcon
+build/
+install/
+log/
+
+# Служебные файлы
+*.swp
+*~
+.DS_Store
+
+# Python
+pycache/
+*.pyc
+src/slam_toolbox
+src/slam_toolbox
