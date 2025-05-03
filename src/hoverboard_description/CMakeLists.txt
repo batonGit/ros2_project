@@ -1,24 +1,27 @@
 cmake_minimum_required(VERSION 3.8)
-project(kinect_freenect)
+project(hoverboard_description)
 
-if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
-endif()
-
+# Find ROS 2 packages
+# ament_cmake provides the necessary infrastructure for ROS 2 build system
 find_package(ament_cmake REQUIRED)
-find_package(rclcpp REQUIRED)
-find_package(sensor_msgs REQUIRED)
 
-add_executable(kinect_node src/kinect_node.cpp)
-target_include_directories(kinect_node PRIVATE /usr/include/libfreenect)
-target_link_libraries(kinect_node PRIVATE freenect)
-ament_target_dependencies(kinect_node rclcpp sensor_msgs)
+# Install directories containing description files and launch files
+# These directories will be copied to the 'share' directory of the installed package.
+# The user remembered this part correctly.
+install(
+  DIRECTORY urdf launch
+  DESTINATION share/${PROJECT_NAME}
+)
 
-install(TARGETS kinect_node DESTINATION lib/${PROJECT_NAME})
-
+# Add checks for linting if testing is enabled
+# This is good practice to include, similar to other packages
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
+  # Depending on your linters configuration, you might also need ament_lint_common,
+  # but ament_lint_auto often takes care of finding its dependencies.
+  # find_package(ament_lint_common REQUIRED)
   ament_lint_auto_find_test_dependencies()
 endif()
 
+# Export information about this package for other packages to depend on it
 ament_package()

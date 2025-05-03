@@ -3,17 +3,20 @@
 <package format="3">
   <name>kinect_freenect</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="vavilov.box.1@gmail.com">root</maintainer>
+  <description>ROS 2 package for Microsoft Kinect using libfreenect</description>
+  <maintainer email="youremail@example.com">root</maintainer>
   <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+  
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
-  <build_depend>ament_cmake</build_depend>
-  <exec_depend>ament_cmake</exec_depend>
+  
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
+
+  <build_depend>libfreenect-dev</build_depend>
+  <exec_depend>libfreenect-dev</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
