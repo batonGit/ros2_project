@@ -9,10 +9,14 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED) # Для Int32 и Bool
+find_package(tf2 REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+# find_package(nav2_msgs REQUIRED) # Возможно потребуется, если node будет публиковать статус или использовать другие типы сообщений Nav2
+
 
 add_executable(navigation_node src/navigation_node.cpp)
 target_include_directories(navigation_node PUBLIC
