@@ -2,6 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
+from std_msgs.msg import Float32  # Для подписки на курс от компаса
 from std_msgs.msg import Int32, Bool
 from sensor_msgs.msg import NavSatFix, LaserScan # LaserScan добавлен
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist # PoseStamped может понадобиться для Nav2
@@ -24,6 +25,8 @@ class NavigationManagerNode(Node):
         self.declare_parameter('config_file', '/root/ros2_ws/src/robot_navigation_manager/config/destinations.yaml')
         self.declare_parameter('time_at_destination_duration', 10.0) # Значение по умолчанию
         self.declare_parameter('gps_logging_interval', 5.0) # Интервал логирования GPS/AMCL
+        self.declare_parameter('gps_wait_timeout_duration', 15.0) # Время ожидания GPS для динамической цели
+
 
         # НОВЫЕ параметры для GPS-навигации и управления
         self.declare_parameter('gps_nav_tolerance_meters', 2.0)  # Допуск для GPS цели в метрах
@@ -34,11 +37,15 @@ class NavigationManagerNode(Node):
 
         # --- Состояния и переменные ---
         # Существующие
+        self.current_true_heading_rad = None  # Для хранения текущего курса от компаса
         self.current_state = 'IDLE'
         self.current_destination_id = None
         self.current_gps_location = None   # NavSatFix
         self.dynamic_gps_target = None     # NavSatFix (Для цели 1 из /gps/fix)
         self.current_map_pose = None       # geometry_msgs/Pose (из AMCL)
+        self.waiting_for_gps_timeout_timer = None
+        self.pending_destination_info_for_gps_wait = None 
+        # self.gps_wait_timeout_duration # Будет получено из параметра ниже
 
         self.destinations = {}
         self.base_location = None
@@ -63,6 +70,7 @@ class NavigationManagerNode(Node):
         # --- ПОЛУЧЕНИЕ ЗНАЧЕНИЙ ВСЕХ ПАРАМЕТРОВ (включая новые) ---
         self.time_at_destination_duration = float(self.get_parameter('time_at_destination_duration').value)
         self.gps_logging_interval = float(self.get_parameter('gps_logging_interval').value)
+        self.gps_wait_timeout_duration = self.get_parameter('gps_wait_timeout_duration').value
         
         self.gps_nav_tolerance = self.get_parameter('gps_nav_tolerance_meters').value
         self.obstacle_detection_distance = self.get_parameter('gps_obstacle_detection_dist_meters').value
@@ -88,6 +96,7 @@ class NavigationManagerNode(Node):
         self.get_logger().info(f"GPS control frequency: {gps_control_frequency} Hz")
         self.get_logger().info(f"Calculated GPS control timer period: {self.gps_timer_period} s")
         self.get_logger().info(f"----------------------------")
+        self.get_logger().info(f"GPS wait timeout duration: {self.gps_wait_timeout_duration} s")
         # <<< КОНЕЦ БЛОКА ЛОГИРОВАНИЯ ПАРАМЕТРОВ >>>
 
         # --- Подписки ---
@@ -95,14 +104,15 @@ class NavigationManagerNode(Node):
         self.robot_gps_sub = self.create_subscription(NavSatFix, '/robot/gps/fix', self.robot_gps_callback, 10)
         self.dynamic_gps_sub = self.create_subscription(NavSatFix, '/gps/fix', self.gps_fix_callback, 10) # Для цели 1
         self.amcl_pose_sub = self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self.amcl_pose_callback, 10)
-        
+        self.heading_sub = self.create_subscription(Float32,'/robot/heading',self.heading_callback,10)
+
         self.lidar_sub = self.create_subscription(
             LaserScan,
             '/scan',
             self.scan_callback,
             rclpy.qos.qos_profile_sensor_data) # QoS для сенсоров
         
-        self.get_logger().info('Subscribed to /destination_id, /robot/gps/fix, /gps/fix (dynamic target 1), /amcl_pose, /scan')
+        self.get_logger().info('Subscribed to /destination_id, /robot/gps/fix, /gps/fix (dynamic target 1), /amcl_pose, /scan, /robot/heading')
 
         # --- Публикации ---
         self.gps_target_pub = self.create_publisher(NavSatFix, '/gps_target', 10) # Может быть полезно для отладки
@@ -167,6 +177,30 @@ class NavigationManagerNode(Node):
             self.map_areas = {}
 
     # --- Callback Methods ---
+
+    def _gps_wait_timeout_callback(self):
+        self.get_logger().warn(f"Timeout waiting for dynamic GPS data for Destination ID {self.current_destination_id} "
+                               f"(target topic: {self.pending_destination_info_for_gps_wait.get('topic_name', 'N/A') if self.pending_destination_info_for_gps_wait else 'N/A'}).")
+
+        if self.waiting_for_gps_timeout_timer: # На всякий случай, хотя он должен быть этим таймером
+            self.waiting_for_gps_timeout_timer.cancel()
+            self.waiting_for_gps_timeout_timer = None
+
+        self.pending_destination_info_for_gps_wait = None
+
+        # Если мы все еще ждали, значит навигация не началась, переходим в IDLE
+        if self.current_state == 'WAITING_FOR_DYNAMIC_GPS':
+            self.get_logger().info("Returning to IDLE due to GPS wait timeout.")
+            self.stop_navigation() # stop_navigation сбросит current_destination_id и состояние
+        else:
+            self.get_logger().info(f"GPS wait timeout occurred, but current state is {self.current_state}, not WAITING_FOR_DYNAMIC_GPS. No state change by timeout.")
+
+
+    def heading_callback(self, msg: Float32):
+        self.current_true_heading_rad = msg.data
+        # Логирование можно добавить для отладки:
+        self.get_logger().debug(f"Received compass heading: {math.degrees(self.current_true_heading_rad):.1f} degrees")
+
     def robot_gps_callback(self, msg):
         self.current_gps_location = msg
         current_time = time.time()
@@ -184,6 +218,27 @@ class NavigationManagerNode(Node):
             self.dynamic_gps_target = msg
             # Логирование с троттлингом можно добавить аналогично robot_gps_callback
             # self.get_logger().info(f"Dynamic GPS target 1 updated: Lat {msg.latitude:.6f}, Lon {msg.longitude:.6f}", throttle_duration_sec=self.gps_logging_interval)
+            self.get_logger().debug(f"Dynamic GPS target 1 updated: Lat {msg.latitude:.6f}, Lon {msg.longitude:.6f}", 
+                               throttle_duration_sec=self.gps_logging_interval if self.gps_logging_interval > 0 else 1.0)
+
+            # Если мы ожидали эти данные для текущей цели
+        if self.current_state == 'WAITING_FOR_DYNAMIC_GPS' and \
+           self.current_destination_id == 1 and \
+           self.pending_destination_info_for_gps_wait is not None:
+
+            self.get_logger().info(f"Dynamic GPS for Destination {self.current_destination_id} (from /gps/fix) "
+                                   "received while waiting. Proceeding with navigation planning.")
+
+            if self.waiting_for_gps_timeout_timer: # Отменяем таймер ожидания
+                self.waiting_for_gps_timeout_timer.cancel()
+                self.waiting_for_gps_timeout_timer = None
+
+            stored_info = self.pending_destination_info_for_gps_wait
+            self.pending_destination_info_for_gps_wait = None # Очищаем
+
+            # Не меняем состояние здесь, start_navigation_to_destination сделает это.
+            # self.set_state('PLANNING_NAVIGATION') # Это произойдет внутри start_navigation_to_destination
+            self.start_navigation_to_destination(stored_info) # Повторно пытаемся начать навигацию
 
 
     def amcl_pose_callback(self, msg):
@@ -325,10 +380,49 @@ class NavigationManagerNode(Node):
     def start_navigation_to_destination(self, destination_info):
         # destination_info это dict для текущей цели из self.destinations
         target_name = destination_info.get('name', f"Destination ID {self.current_destination_id}")
-        self.get_logger().info(f"Starting navigation process for '{target_name}'.")
+        self.get_logger().info(f"Processing navigation request for '{target_name}'.")
+
+        source_type = destination_info.get('source')
+        expected_topic = destination_info.get('topic_name')
+
+                # --- НАЧАЛО ИСПРАВЛЕННОЙ ЛОГИКИ ---
+        # Проверка для динамических GPS целей (пока только Цель 1), если данные еще не пришли
+        if source_type == 'topic' and \
+           self.current_destination_id == 1 and \
+           expected_topic == '/gps/fix' and \
+           self.dynamic_gps_target is None:
+            
+            # Этот блок выполняется, ТОЛЬКО ЕСЛИ УСЛОВИЕ ВЫШЕ ИСТИННО
+            if self.current_state == 'WAITING_FOR_DYNAMIC_GPS' and \
+               self.pending_destination_info_for_gps_wait is not None and \
+               self.pending_destination_info_for_gps_wait.get('name') == destination_info.get('name'): # Проверяем, что ждем ту же цель
+                self.get_logger().info(f"Already waiting for GPS for '{target_name}'. Current wait continues.")
+                return # Выходим, так как уже в процессе ожидания для этой цели
+
+            self.set_state('WAITING_FOR_DYNAMIC_GPS')
+            self.pending_destination_info_for_gps_wait = destination_info
+            
+            if self.waiting_for_gps_timeout_timer: # Отменяем предыдущий таймер ожидания, если он был активен
+                self.waiting_for_gps_timeout_timer.cancel()
+                self.waiting_for_gps_timeout_timer = None # Сбрасываем ссылку на таймер
+            
+            self.waiting_for_gps_timeout_timer = self.create_timer(
+                self.gps_wait_timeout_duration,
+                self._gps_wait_timeout_callback 
+            )
+            self.get_logger().info(f"No dynamic GPS data yet for '{target_name}'. Waiting for data on '{expected_topic}' "
+                                   f"for up to {self.gps_wait_timeout_duration} seconds.")
+            return # Выходим из функции, будем ждать данных в gps_fix_callback или таймаута
         
+        # Если мы дошли сюда, значит:
+        # 1. Это не динамическая GPS-цель, для которой нужно ждать данные (например, source 'recorded'), ИЛИ
+        # 2. Это динамическая GPS-цель (Цель 1), но данные для нее УЖЕ ЕСТЬ (self.dynamic_gps_target is NOT None).
+        
+        # Теперь определяем параметры навигации с учетом текущей доступности данных
         can_navigate, use_map_nav, target_map_pose, target_gps_navsatfix = \
             self._determine_navigation_parameters(destination_info, is_base_return=False)
+        
+        # --- КОНЕЦ ИСПРАВЛЕННОЙ ЛОГИКИ (начальная часть) ---
 
         if can_navigate:
             # Отменяем предыдущую активную цель Nav2, если она была
@@ -609,13 +703,26 @@ class NavigationManagerNode(Node):
 
 
         # Вычисление bearing_to_target_rad и angle_diff_rad для логирования и управления
-        bearing_to_target_rad = math.atan2(local_x_to_target, local_y_to_target) # Угол от Y (Север) к X (Восток)
-        current_robot_yaw_rad_for_logic = 0.0 
-        if self.current_map_pose: # Используем AMCL yaw, если доступен
-            current_robot_yaw_rad_for_logic = self.quaternion_to_yaw(self.current_map_pose.orientation)
-        
-        angle_diff_rad = self.normalize_angle(bearing_to_target_rad - current_robot_yaw_rad_for_logic)
+        bearing_to_target_rad = math.atan2(local_x_to_target, local_y_to_target)  # Угол от Y (Север) к X (Восток)
+        current_robot_yaw_rad_for_logic = None  # Изначально неизвестен
 
+        if self.current_true_heading_rad is not None:
+            current_robot_yaw_rad_for_logic = self.current_true_heading_rad
+        elif self.current_map_pose:
+            current_robot_yaw_rad_for_logic = self.quaternion_to_yaw(self.current_map_pose.orientation)
+            self.get_logger().warn("Compass data N/A, using AMCL pose yaw for GPS navigation.")
+        else:
+            current_robot_yaw_rad_for_logic = 0.0  # Крайний случай
+            self.get_logger().warn("Compass and AMCL data N/A. Assuming yaw=0 for GPS navigation.")
+
+        # Если yaw всё ещё None (на всякий случай):
+        if current_robot_yaw_rad_for_logic is None:
+            self.get_logger().error("Critical error: Robot yaw could not be determined. Stopping movement.")
+            self.cmd_vel_pub.publish(Twist())  # Останавливаем движение
+            return
+
+        # Используем yaw для расчёта угла:
+        angle_diff_rad = self.normalize_angle(bearing_to_target_rad - current_robot_yaw_rad_for_logic)
 
         if obstacle_directly_in_front:
             # self.get_logger().warn("GPS control: Obstacle detected directly in front!") # Будет спамить, используем debug
@@ -679,6 +786,14 @@ class NavigationManagerNode(Node):
             self.time_at_destination_timer.cancel()
             self.time_at_destination_timer = None
             self.get_logger().info("Cancelled 'time at destination' timer.")
+            # --- НОВОЕ: Остановка таймера ожидания GPS и сброс связанной переменной ---
+        if self.waiting_for_gps_timeout_timer is not None:
+            self.waiting_for_gps_timeout_timer.cancel()
+            self.waiting_for_gps_timeout_timer = None
+            self.get_logger().info("Cancelled 'waiting for GPS timeout' timer.")
+        
+        self.pending_destination_info_for_gps_wait = None # Сбрасываем сохраненную информацию о цели, которую ждали
+        # --- КОНЕЦ НОВОГО БЛОКА ---
 
         # 4. Сброс состояния и текущей цели
         self.set_state('IDLE')

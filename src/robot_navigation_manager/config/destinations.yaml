@@ -72,4 +72,4 @@ map_areas:
   'base_map_area':
     bounds: {min_lat: 58.6413730, max_lat: 58.6414942, min_lon: 49.6234000, max_lon: 49.6239000}
 
-time_at_destination_duration: 60.0
+time_at_destination_duration: 300.0

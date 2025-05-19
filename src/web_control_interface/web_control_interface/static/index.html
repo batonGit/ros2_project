@@ -193,7 +193,35 @@
         
         // Stop button
         stopButton.addEventListener('click', function() {
-            resetJoystick();
+            // 1. Сбросить джойстик и отправить мгновенную команду нулевой скорости (текущее поведение)
+            resetJoystick(); 
+
+            // 2. Отправить команду узлу navigation_manager_node для остановки автономной задачи
+            fetch('/set_destination', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    destination_id: 0 // <<< КЛЮЧЕВОЕ ИЗМЕНЕНИЕ
+                }),
+            })
+            .then(response => {
+                if (!response.ok) {
+                    console.error('Stop command response was not ok:', response.statusText);
+                    // Можно добавить вывод ошибки для пользователя на странице
+                    return response.json().then(errData => Promise.reject(errData));
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log('Stop command (destination_id: 0) sent successfully:', data);
+                // Можно добавить подтверждение для пользователя на странице
+            })
+            .catch((error) => {
+                console.error('Error sending stop command (destination_id: 0):', error);
+                // Можно добавить вывод ошибки для пользователя на странице
+            });
         });
         
         // Initial joystick positioning
