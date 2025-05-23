@@ -12,6 +12,7 @@ import yaml
 import os
 import math
 import time
+from nav2_msgs.srv import SaveMap
 # import sys # Не используется, можно удалить
 
 class NavigationManagerNode(Node):
@@ -26,7 +27,7 @@ class NavigationManagerNode(Node):
         self.declare_parameter('time_at_destination_duration', 10.0) # Значение по умолчанию
         self.declare_parameter('gps_logging_interval', 5.0) # Интервал логирования GPS/AMCL
         self.declare_parameter('gps_wait_timeout_duration', 15.0) # Время ожидания GPS для динамической цели
-
+        self.declare_parameter('maps_directory', '/root/ros2_ws/maps_storage') # Путь к директории с картами (если нужно)
 
         # НОВЫЕ параметры для GPS-навигации и управления
         self.declare_parameter('gps_nav_tolerance_meters', 2.0)  # Допуск для GPS цели в метрах
@@ -46,6 +47,8 @@ class NavigationManagerNode(Node):
         self.waiting_for_gps_timeout_timer = None
         self.pending_destination_info_for_gps_wait = None 
         # self.gps_wait_timeout_duration # Будет получено из параметра ниже
+        # self.maps_directory # Будет получено из параметра ниже
+        self.perform_mapping_for_current_task = False # Флаг: нужно ли строить карту для текущей задачи
 
         self.destinations = {}
         self.base_location = None
@@ -71,7 +74,9 @@ class NavigationManagerNode(Node):
         self.time_at_destination_duration = float(self.get_parameter('time_at_destination_duration').value)
         self.gps_logging_interval = float(self.get_parameter('gps_logging_interval').value)
         self.gps_wait_timeout_duration = self.get_parameter('gps_wait_timeout_duration').value
-        
+        self.maps_directory = self.get_parameter('maps_directory').value
+        os.makedirs(self.maps_directory, exist_ok=True) # Создаем директорию, если ее нет
+
         self.gps_nav_tolerance = self.get_parameter('gps_nav_tolerance_meters').value
         self.obstacle_detection_distance = self.get_parameter('gps_obstacle_detection_dist_meters').value
         self.forward_speed_gps = self.get_parameter('gps_forward_speed').value
@@ -97,6 +102,7 @@ class NavigationManagerNode(Node):
         self.get_logger().info(f"Calculated GPS control timer period: {self.gps_timer_period} s")
         self.get_logger().info(f"----------------------------")
         self.get_logger().info(f"GPS wait timeout duration: {self.gps_wait_timeout_duration} s")
+        self.get_logger().info(f"Maps storage directory: {self.maps_directory}")
         # <<< КОНЕЦ БЛОКА ЛОГИРОВАНИЯ ПАРАМЕТРОВ >>>
 
         # --- Подписки ---
@@ -124,6 +130,10 @@ class NavigationManagerNode(Node):
         self._nav_to_pose_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.get_logger().info('Nav2 NavigateToPose Action Client created')
         
+        # --- НОВЫЙ КЛИЕНТ СЕРВИСА ДЛЯ СОХРАНЕНИЯ КАРТЫ ---
+        self.save_map_client = self.create_client(SaveMap, '/slam_toolbox/save_map')
+        self.get_logger().info("SaveMap service client for /slam_toolbox/save_map created.")
+
         # --- Финальная инициализация ---
         self.get_logger().info('Navigation Manager Node fully initialized.')
         self.set_state('IDLE')
@@ -305,7 +315,39 @@ class NavigationManagerNode(Node):
         target_name = target_location_info.get('name', 'Unnamed Target')
 
         self.get_logger().info(f"Determining nav params for '{target_name}', source: '{source_type}'")
+            # --- НОВЫЙ БЛОК: Принудительный GPS-режим, если активно картографирование ---
+        if self.perform_mapping_for_current_task and not is_base_return: # Не применяем для возврата на базу, если только база не в новой зоне
+            self.get_logger().info(f"Mapping mode is active for '{target_name}'. Forcing GPS navigation for exploration.")
+            use_map_nav = False # Не используем карту, даже если она указана в destination_info как общая
+            target_map_pose_stamped = None
 
+            # Пытаемся получить GPS координаты для цели
+            if target_location_info.get('source') == 'topic':
+                # Логика для динамической цели (например, Цель 1)
+                expected_topic = target_location_info.get('topic_name')
+                if self.current_destination_id == 1 and expected_topic == '/gps/fix' and self.dynamic_gps_target:
+                    target_gps_navsatfix = self.dynamic_gps_target
+                    can_navigate = True
+                else:
+                    self.get_logger().warn(f"'{target_name}' (mapping mode): Dynamic GPS data not available.")
+                    can_navigate = False
+            elif 'gps_coords' in target_location_info: # Для 'recorded' целей берем их gps_coords
+                coords = target_location_info['gps_coords']
+                if isinstance(coords, dict) and 'latitude' in coords and 'longitude' in coords:
+                    target_gps_navsatfix = NavSatFix()
+                    target_gps_navsatfix.latitude = float(coords['latitude'])
+                    target_gps_navsatfix.longitude = float(coords['longitude'])
+                    target_gps_navsatfix.altitude = float(coords.get('altitude', 0.0))
+                    can_navigate = True
+                else:
+                    self.get_logger().error(f"'{target_name}' (mapping mode): Recorded 'gps_coords' are invalid.")
+                    can_navigate = False
+            else:
+                self.get_logger().error(f"'{target_name}' (mapping mode): No GPS coordinates available for exploration.")
+                can_navigate = False
+
+            return can_navigate, use_map_nav, target_map_pose_stamped, target_gps_navsatfix
+        # --- КОНЕЦ НОВОГО БЛОКА ---
         if source_type == 'topic':
             # Пока что жестко привязано к self.current_destination_id == 1 для /gps/fix
             # и self.dynamic_gps_target. В будущем это нужно обобщить.
@@ -381,7 +423,27 @@ class NavigationManagerNode(Node):
         # destination_info это dict для текущей цели из self.destinations
         target_name = destination_info.get('name', f"Destination ID {self.current_destination_id}")
         self.get_logger().info(f"Processing navigation request for '{target_name}'.")
+        self.current_task_specific_map_exists = False # Флаг для текущей задачи
+        self.current_task_map_path = "" # Путь к карте для текущей задачи, если она есть/будет
+        
+        if self.current_destination_id is not None and self.current_destination_id > 0: # Для Destination 0 (стоп) карта не нужна
+            # Формируем ожидаемое имя файла карты для текущего пункта назначения
+            # Например, для Destination 1 будет destmap1.yaml, для Destination 2 - destmap2.yaml
+            map_file_name = f"destmap{self.current_destination_id}.yaml"
+            self.current_task_map_path = os.path.join(self.maps_directory, map_file_name)
 
+            if os.path.exists(self.current_task_map_path):
+                self.current_task_specific_map_exists = True
+                self.get_logger().info(f"Map for '{target_name}' found at: {self.current_task_map_path}")
+            else:
+                self.current_task_specific_map_exists = False
+                self.get_logger().info(f"Map for '{target_name}' NOT found at: {self.current_task_map_path}. SLAM mode may be required.")
+                 # --- НОВОЕ: Устанавливаем флаг картографирования ---
+                self.perform_mapping_for_current_task = True
+                self.get_logger().info(f"SLAM mode activated for this task. Will navigate via GPS to build map: {map_file_name}")
+        else: # Для ID=0 (стоп) или если ID не установлен, картографирование не выполняем
+            self.perform_mapping_for_current_task = False
+        # --- КОНЕЦ НОВОГО БЛОКА И БЛОКА ПРОВЕРКИ КАРТЫ ---
         source_type = destination_info.get('source')
         expected_topic = destination_info.get('topic_name')
 
@@ -516,9 +578,10 @@ class NavigationManagerNode(Node):
                 self.set_state('AT_DESTINATION')
                 self.start_time_at_destination_timer()
             elif self.current_state == 'RETURNING_TO_BASE_MAP':
-                self.get_logger().info("Successfully returned to base (map navigation). Setting state to IDLE.")
-                self.set_state('IDLE')
-                self.current_destination_id = None # Сбрасываем цель после возврата на базу
+                self.get_logger().info("Successfully returned to base (map navigation). Processing task completion.")
+                self.active_nav2_goal_handle = None # Сбрасываем хэндл цели Nav2
+                self._process_task_completion() # <--- НОВЫЙ ВЫЗОВ
+                # self.set_state('IDLE') и сброс current_destination_id теперь произойдет внутри _process_task_completion -> stop_navigation
         elif status == GoalStatus.STATUS_CANCELED:
             self.get_logger().warn("Nav2 navigation was CANCELED.")
             # stop_navigation() уже был вызван, если отмена была инициирована нами.
@@ -666,9 +729,10 @@ class NavigationManagerNode(Node):
                 self.set_state('AT_DESTINATION')
                 self.start_time_at_destination_timer()
             elif self.current_state == 'RETURNING_TO_BASE_GPS':
-                self.get_logger().info("Successfully returned to base (GPS navigation). Setting state to IDLE.")
-                self.set_state('IDLE')
-                self.current_destination_id = None
+                self.get_logger().info("Successfully returned to base (GPS navigation). Processing task completion.")
+                self._stop_gps_direct_navigation_loop() # Останавливаем цикл GPS перед обработкой завершения
+                self._process_task_completion() # <--- НОВЫЙ ВЫЗОВ
+                # self.set_state('IDLE') и сброс current_destination_id теперь произойдет внутри _process_task_completion -> stop_navigation
             return
 
         twist_cmd = Twist()
@@ -794,11 +858,46 @@ class NavigationManagerNode(Node):
         
         self.pending_destination_info_for_gps_wait = None # Сбрасываем сохраненную информацию о цели, которую ждали
         # --- КОНЕЦ НОВОГО БЛОКА ---
+        # --- НОВОЕ: Сброс флага выполнения картографирования ---
+        self.perform_mapping_for_current_task = False 
+        self.get_logger().info("Mapping flag 'perform_mapping_for_current_task' reset.") # Опциональное логирование
+        # --- КОНЕЦ НОВОГО ДОБАВЛЕНИЯ ---
 
         # 4. Сброс состояния и текущей цели
         self.set_state('IDLE')
         self.current_destination_id = None 
         self.get_logger().info("Navigation fully stopped. State set to IDLE.")
+
+    def _process_task_completion(self):
+        self.get_logger().info("Task sequence considered complete (returned to base or task finished).")
+
+        if self.perform_mapping_for_current_task and self.current_task_map_path:
+            self.get_logger().info(f"Mapping was active for this task. Attempting to save map associated with: {self.current_task_map_path}")
+
+            # Извлекаем базовое имя и путь без расширения .yaml для сервиса SaveMap
+            # self.current_task_map_path у нас содержит полный путь + имя + .yaml
+            # Сервис ожидает map_url без расширения.
+            map_base_url_for_saving = os.path.splitext(self.current_task_map_path)[0]
+
+            # Вызываем ранее созданный метод для сохранения карты
+            # call_save_map_service вернет True или False
+            map_saved_successfully = self.call_save_map_service(map_base_url_for_saving)
+
+            if map_saved_successfully:
+                self.get_logger().info(f"Map '{map_base_url_for_saving}' seems to have been saved successfully after task completion.")
+                # Теперь self.current_task_specific_map_exists для этой карты должно быть True
+                # Мы могли бы обновить этот флаг для уже загруженной конфигурации, но
+                # при следующем выборе этой цели он все равно будет проверен через os.path.exists()
+            else:
+                self.get_logger().error(f"Failed to save map '{map_base_url_for_saving}' after task completion.")
+        else:
+            self.get_logger().info("No active mapping task was flagged for this completed sequence, or map path was not set. Map will not be saved.")
+
+        # После попытки сохранения карты (или если оно не требовалось),
+        # полностью останавливаем навигацию и переходим в IDLE.
+        # stop_navigation() также сбросит self.perform_mapping_for_current_task для СЛЕДУЮЩЕЙ задачи.
+        self.get_logger().info("Proceeding to stop all activities and set state to IDLE.")
+        self.stop_navigation()
 
     def quaternion_to_yaw(self, q_geom_msg_pose_orientation):
         """Конвертирует geometry_msgs/Quaternion в угол рыскания (yaw) вокруг оси Z."""
@@ -837,6 +936,56 @@ class NavigationManagerNode(Node):
         self.stop_navigation() # Убедимся, что все таймеры и задачи остановлены
         # Дополнительная очистка ресурсов, если потребуется (например, закрытие файлов)
         super().destroy_node()
+
+    def call_save_map_service(self, map_base_url_without_extension):
+        """
+        Вызывает сервис /slam_toolbox/save_map для сохранения карты.
+        map_base_url_without_extension: базовый путь и имя файла карты без расширения
+                                        (например, "/root/ros2_ws/maps_storage/destmap1")
+        Возвращает True в случае успеха, False в случае ошибки.
+        """
+        if not self.save_map_client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().error('SaveMap service /slam_toolbox/save_map not available.')
+            return False
+
+        request = SaveMap.Request()
+        # map_topic обычно "map", если slam_toolbox публикует карту в этот топик
+        # request.map_topic = "map" # В ROS2 Humble SaveMap.srv не имеет map_topic, он берется из slam_toolbox
+        request.map_url = map_base_url_without_extension 
+        request.image_format = "pgm"  # Стандартный формат для Nav2
+        request.map_mode = "trinary" # trinary (0, 100, -1), scale, or raw
+        request.free_thresh = 0.25   # Стандартные значения из map_saver
+        request.occupied_thresh = 0.65
+
+        self.get_logger().info(f"Requesting to save map via service: '{map_base_url_without_extension}.yaml/.pgm'...")
+        future = self.save_map_client.call_async(request)
+
+        # Ожидаем завершения вызова сервиса (блокирующий вызов)
+        # Это упрощенный вариант для синхронного ожидания.
+        # В более сложных сценариях можно использовать add_done_callback.
+        try:
+            # Увеличим таймаут ожидания, так как сохранение карты может занять время
+            rclpy.spin_until_future_complete(self, future, timeout_sec=15.0) 
+            if future.done():
+                response = future.result()
+                if response is not None and hasattr(response, 'result') and response.result:
+                    self.get_logger().info(f"Map successfully saved to '{map_base_url_without_extension}.yaml/.pgm'")
+                    return True
+                elif response is not None: # slam_toolbox в Humble возвращает пустой ответ при успехе.
+                                        # Отсутствие исключения и не None результат считаем успехом.
+                    self.get_logger().info(f"Map save service call completed (likely success) for '{map_base_url_without_extension}'. Check files.")
+                    # Проверка фактического существования файла может быть добавлена здесь, если необходимо
+                    # Например, time.sleep(0.5) а затем os.path.exists(map_base_url_without_extension + ".yaml")
+                    return True # Предполагаем успех, если нет ошибок и результат не явно False
+                else: # future.result() вернул None (возможно, таймаут или другая проблема)
+                    self.get_logger().error(f"Failed to save map. Service call did not return a valid response or timed out for '{map_base_url_without_extension}'.")
+                    return False
+            else: # future не завершился за таймаут
+                self.get_logger().error(f"SaveMap service call timed out for '{map_base_url_without_extension}'.")
+                return False
+        except Exception as e:
+            self.get_logger().error(f"SaveMap service call failed with exception for '{map_base_url_without_extension}': {e}")
+            return False
 
 
 def main(args=None):
