@@ -17,7 +17,7 @@
             position: relative;
             background-color: #f0f0f0;
             border-radius: 50%;
-            touch-action: none;
+            touch-action: none; /* Important for touch devices */
         }
         .joystick {
             width: 100px;
@@ -25,8 +25,8 @@
             background-color: #007bff;
             border-radius: 50%;
             position: absolute;
-            top: 100px;
-            left: 100px;
+            top: 100px; /* Initial position, will be centered by JS */
+            left: 100px; /* Initial position, will be centered by JS */
             cursor: pointer;
             z-index: 10;
         }
@@ -35,6 +35,9 @@
         }
         .button-row {
             margin-top: 20px;
+            display: flex; /* For better button alignment */
+            justify-content: center; /* Center buttons in the row */
+            flex-wrap: wrap; /* Allow buttons to wrap on smaller screens */
         }
         button {
             padding: 15px 25px;
@@ -65,7 +68,7 @@
     
     <div class="button-row">
         <button id="stopButton">STOP</button>
-    </div>
+        <button id="rotateButton">Rotation</button> </div>
  
     <div class="button-row">
          <h3>Destination Points</h3>
@@ -81,80 +84,90 @@
         const linearXDisplay = document.getElementById('linearX');
         const angularZDisplay = document.getElementById('angularZ');
         const stopButton = document.getElementById('stopButton');
+        const rotateButton = document.getElementById('rotateButton'); // НОВАЯ ПЕРЕМЕННАЯ ДЛЯ КНОПКИ
         
         let isDragging = false;
-        let ctrlRect = controlPad.getBoundingClientRect();
-        let centerX = ctrlRect.width / 2;
-        let centerY = ctrlRect.height / 2;
-        let maxRadius = centerX;
+        let ctrlRect; // Will be initialized on load/resize
+        let centerX;
+        let centerY;
+        let maxRadius;
         
         let linearX = 0;
         let angularZ = 0;
         
         function updateJoystickPosition(clientX, clientY) {
-            ctrlRect = controlPad.getBoundingClientRect();
+            // Ensure ctrlRect is valid, might not be if called before load/resize
+            if (!ctrlRect) return; 
             
-            // Calculate position relative to center of control pad
             let relX = clientX - ctrlRect.left - centerX;
             let relY = clientY - ctrlRect.top - centerY;
             
-            // Calculate distance from center
             let distance = Math.sqrt(relX * relX + relY * relY);
             
-            // If outside the control pad, normalize to the edge
             if (distance > maxRadius) {
                 relX = (relX / distance) * maxRadius;
                 relY = (relY / distance) * maxRadius;
-                distance = maxRadius;
             }
             
-            // Update joystick position
-            joystick.style.left = (centerX + relX - joystick.offsetWidth / 2) + 'px';
-            joystick.style.top = (centerY + relY - joystick.offsetHeight / 2) + 'px';
+            joystick.style.transform = `translate(${relX}px, ${relY}px)`;
             
-            // Calculate control values
-            linearX = -relY / maxRadius;  // Forward is negative Y
-            angularZ = -relX / maxRadius;  // Left is negative X
+            linearX = parseFloat((-relY / maxRadius * 0.5).toFixed(2));  // Max 0.5 m/s, forward is negative Y
+            angularZ = parseFloat((-relX / maxRadius * 1.0).toFixed(2)); // Max 1.0 rad/s, left is negative X
             
-            // Scale values
-            linearX = parseFloat((linearX * 0.5).toFixed(2));  // Scale to max 0.5 m/s
-            angularZ = parseFloat((angularZ * 1.0).toFixed(2));  // Scale to max 1.0 rad/s
-            
-            // Update display
             linearXDisplay.textContent = linearX;
             angularZDisplay.textContent = angularZ;
             
-            // Send command
-            sendCommand();
+            sendCommand(linearX, angularZ);
         }
         
         function resetJoystick() {
-            joystick.style.left = (centerX - joystick.offsetWidth / 2) + 'px';
-            joystick.style.top = (centerY - joystick.offsetHeight / 2) + 'px';
+            joystick.style.transform = 'translate(0px, 0px)'; // Reset to center of pad
             linearX = 0;
             angularZ = 0;
             linearXDisplay.textContent = linearX;
             angularZDisplay.textContent = angularZ;
-            sendCommand();
+            sendCommand(linearX, angularZ);
         }
         
-        function sendCommand() {
+        function sendCommand(lX, aZ) { // Pass values as arguments
             fetch('/control', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    linear_x: linearX,
-                    angular_z: angularZ
+                    linear_x: lX,
+                    angular_z: aZ
                 }),
-            });
+            })
+            .then(response => {
+                if (!response.ok) {
+                    console.error('SendCommand response was not ok:', response.statusText);
+                }
+                // No need to parse JSON if Flask returns simple 200 with no body for this endpoint
+            })
+            .catch(error => console.error('Error in sendCommand:', error));
+        }
+
+        function initializeControlPad() {
+            ctrlRect = controlPad.getBoundingClientRect();
+            centerX = controlPad.offsetWidth / 2; // Use offsetWidth for dimensions of the element itself
+            centerY = controlPad.offsetHeight / 2;
+            maxRadius = controlPad.offsetWidth / 2 - joystick.offsetWidth / 2; // Max radius for joystick center
+            
+            // Set joystick to the center of the controlPad initially
+            joystick.style.left = (centerX - joystick.offsetWidth / 2) + 'px';
+            joystick.style.top = (centerY - joystick.offsetHeight / 2) + 'px';
+            resetJoystick(); // Send initial zero command
         }
         
         // Mouse events
-        joystick.addEventListener('mousedown', function(e) {
-            isDragging = true;
-            updateJoystickPosition(e.clientX, e.clientY);
+        controlPad.addEventListener('mousedown', function(e) {
+            if (e.target === joystick || controlPad.contains(e.target)) { // Allow starting drag from pad too
+                 isDragging = true;
+                 document.body.style.cursor = 'grabbing';
+                 updateJoystickPosition(e.clientX, e.clientY);
+            }
         });
         
         document.addEventListener('mousemove', function(e) {
@@ -166,25 +179,28 @@
         document.addEventListener('mouseup', function() {
             if (isDragging) {
                 isDragging = false;
+                document.body.style.cursor = 'default';
                 resetJoystick();
             }
         });
         
         // Touch events
-        joystick.addEventListener('touchstart', function(e) {
-            e.preventDefault();
-            isDragging = true;
-            updateJoystickPosition(e.touches[0].clientX, e.touches[0].clientY);
-        });
+        controlPad.addEventListener('touchstart', function(e) {
+            if (e.target === joystick || controlPad.contains(e.target)) {
+                e.preventDefault(); // Prevent page scrolling
+                isDragging = true;
+                updateJoystickPosition(e.touches[0].clientX, e.touches[0].clientY);
+            }
+        }, { passive: false }); // passive: false for preventDefault
         
         document.addEventListener('touchmove', function(e) {
             if (isDragging) {
                 e.preventDefault();
                 updateJoystickPosition(e.touches[0].clientX, e.touches[0].clientY);
             }
-        });
+        }, { passive: false });
         
-        document.addEventListener('touchend', function() {
+        document.addEventListener('touchend', function(e) {
             if (isDragging) {
                 isDragging = false;
                 resetJoystick();
@@ -193,102 +209,91 @@
         
         // Stop button
         stopButton.addEventListener('click', function() {
-            // 1. Сбросить джойстик и отправить мгновенную команду нулевой скорости (текущее поведение)
             resetJoystick(); 
-
-            // 2. Отправить команду узлу navigation_manager_node для остановки автономной задачи
             fetch('/set_destination', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    destination_id: 0 // <<< КЛЮЧЕВОЕ ИЗМЕНЕНИЕ
+                    destination_id: 0 
                 }),
             })
             .then(response => {
                 if (!response.ok) {
-                    console.error('Stop command response was not ok:', response.statusText);
-                    // Можно добавить вывод ошибки для пользователя на странице
+                    console.error('Stop command (dest_id:0) response was not ok:', response.statusText);
                     return response.json().then(errData => Promise.reject(errData));
                 }
                 return response.json();
             })
             .then(data => {
                 console.log('Stop command (destination_id: 0) sent successfully:', data);
-                // Можно добавить подтверждение для пользователя на странице
             })
             .catch((error) => {
                 console.error('Error sending stop command (destination_id: 0):', error);
-                // Можно добавить вывод ошибки для пользователя на странице
             });
         });
-        
-        // Initial joystick positioning
-        window.addEventListener('load', function() {
-            ctrlRect = controlPad.getBoundingClientRect();
-            centerX = ctrlRect.width / 2;
-            centerY = ctrlRect.height / 2;
-            maxRadius = centerX;
-            resetJoystick();
-        });
-        
-        window.addEventListener('resize', function() {
-            ctrlRect = controlPad.getBoundingClientRect();
-            centerX = ctrlRect.width / 2;
-            centerY = ctrlRect.height / 2;
-            maxRadius = centerX;
-            resetJoystick();
-        });
 
-        // Destination buttons
-        document.getElementById('dest1').addEventListener('click', function() {
-           fetch('/set_destination', {
-               method: 'POST',
-               headers: {
-                   'Content-Type': 'application/json',
-               },
-               body: JSON.stringify({
-                   destination_id: 1
-               }),
-           });
-         });
+        // --- НОВЫЙ ОБРАБОТЧИК ДЛЯ КНОПКИ "Rotation" ---
+        rotateButton.addEventListener('click', function() {
+            console.log('Rotation button clicked');
+            const angularVelocityForRotation = -1.0; // Для steer = -90 (по часовой стрелке)
+            const minimalLinearXForRotation = 0.08; // Маленькая скорость вперед, попробуйте 0.01, 0.02 или 0.03                                         // Отрицательное значение для вращения по часовой стрелке
+                                                      // Можете изменить это значение для другой скорости вращения.
 
-         document.getElementById('dest2').addEventListener('click', function() {
-            fetch('/set_destination', {
-               method: 'POST',
-               headers: {
-                   'Content-Type': 'application/json',
-               },
-               body: JSON.stringify({
-                   destination_id: 2
-               }),
-            });
-           });
+            // Обновляем отображение на странице для команды вращения
+            linearXDisplay.textContent = "0.00"; // Явное указание
+            angularZDisplay.textContent = angularVelocityForRotation.toFixed(2); // Отображаем значение
 
-          document.getElementById('dest3').addEventListener('click', function() {
-             fetch('/set_destination', {
+            // Отправляем команду на сервер
+            fetch('/control', { 
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    destination_id: 3
+                    linear_x: minimalLinearXForRotation, // Маленькая скорость вперед 
+                    angular_z: angularVelocityForRotation 
                 }),
-             });
-           });
-
-           document.getElementById('dest4').addEventListener('click', function() {
-              fetch('/set_destination', {
-                 method: 'POST',
-                 headers: {
-                     'Content-Type': 'application/json',
-                 },
-                 body: JSON.stringify({
-                     destination_id: 4
-                 }),
-              });
+            })
+            .then(response => {
+                if (!response.ok) {
+                    console.error('Rotation command response was not ok:', response.statusText);
+                }
+                // Обычно /control не возвращает JSON тело при успехе, так что response.json() может вызвать ошибку
+                // Если Flask возвращает jsonify({'status': 'success'}), то response.json() нужен.
+                // Я убрал .then(response => response.json()) для простоты, если /control не шлет JSON в ответ.
+            })
+            .then(data => { // Этот .then(data) может не выполниться или data будет undefined, если нет JSON ответа
+                console.log('Rotation command acknowledged by server.');
+            })
+            .catch((error) => {
+                console.error('Error sending rotation command:', error);
             });
+        });
+        // --- КОНЕЦ НОВОГО ОБРАБОТЧИКА ---
+        
+        // Initial joystick and control pad setup
+        window.addEventListener('load', initializeControlPad);
+        window.addEventListener('resize', initializeControlPad);
+
+        // Destination buttons helper function
+        function sendDestination(id) {
+            console.log(`Sending destination_id: ${id}`);
+            fetch('/set_destination', {
+               method: 'POST',
+               headers: { 'Content-Type': 'application/json', },
+               body: JSON.stringify({ destination_id: id }),
+            })
+            .then(response => response.json()) // Предполагаем, что /set_destination возвращает JSON
+            .then(data => console.log(`Destination ${id} command acknowledged:`, data))
+            .catch(error => console.error(`Error sending destination ${id}:`, error));
+        }
+
+        document.getElementById('dest1').addEventListener('click', function() { sendDestination(1); });
+        document.getElementById('dest2').addEventListener('click', function() { sendDestination(2); });
+        document.getElementById('dest3').addEventListener('click', function() { sendDestination(3); });
+        document.getElementById('dest4').addEventListener('click', function() { sendDestination(4); });
     </script>
 </body>
 </html>
