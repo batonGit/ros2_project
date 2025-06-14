@@ -3,4 +3,4 @@
 std_msgs/Header header
 
 # Массив распознанных объектов
-vision_processing/Detection[] detections
+vision_interfaces/Detection[] detections

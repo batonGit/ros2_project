@@ -9,7 +9,7 @@ import numpy as np
 import sys # Для завершения работы при ошибке
 
 # Импортируем наши новые кастомные сообщения
-from vision_processing.msg import Detection, Detections
+from vision_interfaces.msg import Detection, Detections
 
 class YOLONode(Node):
     def __init__(self):
