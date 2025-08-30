@@ -4,6 +4,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32  # Для подписки на курс от компаса
 from std_msgs.msg import Int32, Bool
+from std_msgs.msg import String
 from sensor_msgs.msg import NavSatFix, LaserScan # LaserScan добавлен
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist # PoseStamped может понадобиться для Nav2
 from rclpy.action import ActionClient
@@ -18,125 +19,97 @@ from nav2_msgs.srv import SaveMap
 class NavigationManagerNode(Node):
 
     def __init__(self):
-        super().__init__('navigation_manager_node')
+            super().__init__('navigation_manager_node')
 
-        # --- Параметры ---
-        # Существующие параметры
-        # Используем ваш подтвержденный путь к файлу конфигурации
-        self.declare_parameter('config_file', '/root/ros2_ws/src/robot_navigation_manager/config/destinations.yaml')
-        self.declare_parameter('time_at_destination_duration', 10.0) # Значение по умолчанию
-        self.declare_parameter('gps_logging_interval', 5.0) # Интервал логирования GPS/AMCL
-        self.declare_parameter('gps_wait_timeout_duration', 15.0) # Время ожидания GPS для динамической цели
-        self.declare_parameter('maps_directory', '/root/ros2_ws/maps_storage') # Путь к директории с картами (если нужно)
+            # --- Параметры ---
+            self.declare_parameter('config_file', '/root/ros2_ws/src/robot_navigation_manager/config/destinations.yaml')
+            self.declare_parameter('maps_directory', '/root/ros2_ws/maps_storage')
+            self.declare_parameter('time_at_destination_duration', 10.0)
+            self.declare_parameter('gps_logging_interval', 5.0)
+            self.declare_parameter('gps_nav_tolerance_meters', 2.0)
+            self.declare_parameter('gps_obstacle_detection_dist_meters', 0.7)
+            self.declare_parameter('gps_forward_speed', 0.2)
+            self.declare_parameter('gps_turn_speed', 0.3)
+            self.declare_parameter('gps_control_frequency_hz', 5.0)
+            self.declare_parameter('gps_wait_timeout_duration', 15.0)
+            
+            # --- НОВЫЕ ПАРАМЕТРЫ ДЛЯ ПОСТОЯННОЙ ПРОВЕРКИ GPS ---
+            self.declare_parameter('hw_gps_timeout_sec', 15.0) # Сколько секунд ждать аппаратный GPS, прежде чем переключиться на MQTT
+            self.declare_parameter('gps_source_check_period_sec', 3.0) # Как часто проверять состояние источника GPS
 
-        # НОВЫЕ параметры для GPS-навигации и управления
-        self.declare_parameter('gps_nav_tolerance_meters', 2.0)  # Допуск для GPS цели в метрах
-        self.declare_parameter('gps_obstacle_detection_dist_meters', 0.7) # Дистанция обнаружения препятствий
-        self.declare_parameter('gps_forward_speed', 0.2)         # Линейная скорость в GPS режиме (м/с)
-        self.declare_parameter('gps_turn_speed', 0.3)            # Угловая скорость в GPS режиме (рад/с)
-        self.declare_parameter('gps_control_frequency_hz', 5.0)  # Частота цикла управления GPS (Гц)
+            # --- Состояния и переменные ---
+            # Существующие
+            self.current_state = 'IDLE'
+            self.current_destination_id = None
+            self.current_gps_location = None   # NavSatFix - ОБЩЕЕ МЕСТОПОЛОЖЕНИЕ РОБОТА
+            self.dynamic_gps_target = None     # NavSatFix (Для цели 1 из /gps/fix)
+            self.current_map_pose = None       # geometry_msgs/Pose (из AMCL)
+            self.current_true_heading_rad = None # Курс от компаса
+            self.current_scan = None
+            self.target_gps_for_direct_nav = None
+            self.gps_navigation_timer = None
+            self.active_nav2_goal_handle = None
+            self.time_at_destination_timer = None
+            self.waiting_for_gps_timeout_timer = None
+            self.pending_destination_info_for_gps_wait = None
+            self.current_task_specific_map_exists = False
+            self.current_task_map_path = ""
+            self.perform_mapping_for_current_task = False
 
-        # --- Состояния и переменные ---
-        # Существующие
-        self.current_true_heading_rad = None  # Для хранения текущего курса от компаса
-        self.current_state = 'IDLE'
-        self.current_destination_id = None
-        self.current_gps_location = None   # NavSatFix
-        self.dynamic_gps_target = None     # NavSatFix (Для цели 1 из /gps/fix)
-        self.current_map_pose = None       # geometry_msgs/Pose (из AMCL)
-        self.waiting_for_gps_timeout_timer = None
-        self.pending_destination_info_for_gps_wait = None 
-        # self.gps_wait_timeout_duration # Будет получено из параметра ниже
-        # self.maps_directory # Будет получено из параметра ниже
-        self.perform_mapping_for_current_task = False # Флаг: нужно ли строить карту для текущей задачи
+            self.destinations = {}
+            self.base_location = None
+            self.map_areas = {}
+            
+            # --- ИЗМЕНЕННЫЕ ПЕРЕМЕННЫЕ СОСТОЯНИЯ ДЛЯ ВЫБОРА GPS ---
+            self.active_gps_source = 'UNKNOWN' # 'UNKNOWN', 'HARDWARE', 'MQTT_FALLBACK'
+            self.last_hw_gps_time = None # Время последнего получения данных от аппаратного GPS
 
-        self.destinations = {}
-        self.base_location = None
-        self.map_areas = {}
+            # --- Конфигурация ---
+            self.load_configuration()
 
-        self.time_at_destination_timer = None
-        # self.time_at_destination_duration # Будет перезаписано из параметра
-        self.last_gps_log_time = 0.0       # Для троттлинга логов GPS/AMCL
-        # self.gps_logging_interval       # Будет перезаписано из параметра
+            # --- Получение значений параметров ---
+            self.time_at_destination_duration = self.get_parameter('time_at_destination_duration').value
+            self.gps_logging_interval = self.get_parameter('gps_logging_interval').value
+            self.gps_nav_tolerance = self.get_parameter('gps_nav_tolerance_meters').value
+            self.obstacle_detection_distance = self.get_parameter('gps_obstacle_detection_dist_meters').value
+            self.forward_speed_gps = self.get_parameter('gps_forward_speed').value
+            self.turn_speed_gps = self.get_parameter('gps_turn_speed').value
+            gps_control_frequency = self.get_parameter('gps_control_frequency_hz').value
+            self.gps_timer_period = 1.0 / gps_control_frequency if gps_control_frequency > 0 else 0.2
+            self.gps_wait_timeout_duration = self.get_parameter('gps_wait_timeout_duration').value
+            self.maps_directory = self.get_parameter('maps_directory').value
+            os.makedirs(self.maps_directory, exist_ok=True)
+            self.hw_gps_timeout_duration = self.get_parameter('hw_gps_timeout_sec').value
+            self.gps_source_check_period = self.get_parameter('gps_source_check_period_sec').value
+            self.get_logger().info(f"GPS source status will be checked every {self.gps_source_check_period}s with a timeout of {self.hw_gps_timeout_duration}s.")
 
-        self.manual_control_active = False # Пока не используется явно
+            # --- Подписки ---
+            self.destination_sub = self.create_subscription(Int32, '/destination_id', self.destination_callback, 10)
+            self.dynamic_gps_sub = self.create_subscription(NavSatFix, '/gps/fix', self.gps_fix_callback, 10)
+            self.amcl_pose_sub = self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self.amcl_pose_callback, 10)
+            self.lidar_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, rclpy.qos.qos_profile_sensor_data)
+            self.heading_sub = self.create_subscription(Float32, '/robot/heading', self.heading_callback, 10)
+            
+            # --- ИЗМЕНЕНИЕ: Два подписчика на GPS робота ---
+            self.robot_hw_gps_sub = self.create_subscription(NavSatFix, '/robot/gps/fix', self.robot_hw_gps_callback, 10)
+            self.robot_mqtt_gps_sub = self.create_subscription(NavSatFix, '/robot/gps/fix_mqtt', self.robot_mqtt_gps_callback, 10)
+            self.get_logger().info("Subscribed to all topics including '/robot/gps/fix' (Hardware) and '/robot/gps/fix_mqtt' (MQTT Fallback)")
 
-        # НОВЫЕ переменные для GPS-навигации и Nav2
-        self.current_scan = None              # sensor_msgs/LaserScan
-        self.target_gps_for_direct_nav = None # NavSatFix: Текущая GPS-цель для прямого управления
-        self.gps_navigation_timer = None      # Таймер для цикла прямого GPS управления
-        self.active_nav2_goal_handle = None   # Для возможности отмены цели Nav2
+            # --- Паблишеры и клиенты ---
+            self.gps_target_pub = self.create_publisher(NavSatFix, '/gps_target', 10)
+            self.gps_mode_control_pub = self.create_publisher(Bool, '/gps_mode_control', 10)
+            self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+            self._nav_to_pose_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+            self.save_map_client = self.create_client(SaveMap, '/slam_toolbox/save_map')
+            self.get_logger().info("Publishers and action/service clients created.")
+            self.state_publisher = self.create_publisher(String, '/robot_status', 10)
 
-        # --- Конфигурация ---
-        self.load_configuration() # Загрузка YAML (здесь может быть переопределен time_at_destination_duration из файла)
-
-        # --- ПОЛУЧЕНИЕ ЗНАЧЕНИЙ ВСЕХ ПАРАМЕТРОВ (включая новые) ---
-        self.time_at_destination_duration = float(self.get_parameter('time_at_destination_duration').value)
-        self.gps_logging_interval = float(self.get_parameter('gps_logging_interval').value)
-        self.gps_wait_timeout_duration = self.get_parameter('gps_wait_timeout_duration').value
-        self.maps_directory = self.get_parameter('maps_directory').value
-        os.makedirs(self.maps_directory, exist_ok=True) # Создаем директорию, если ее нет
-
-        self.gps_nav_tolerance = self.get_parameter('gps_nav_tolerance_meters').value
-        self.obstacle_detection_distance = self.get_parameter('gps_obstacle_detection_dist_meters').value
-        self.forward_speed_gps = self.get_parameter('gps_forward_speed').value
-        self.turn_speed_gps = self.get_parameter('gps_turn_speed').value
-        gps_control_frequency = self.get_parameter('gps_control_frequency_hz').value
-        try:
-            self.gps_timer_period = 1.0 / gps_control_frequency if gps_control_frequency > 0 else 0.2 # Защита от деления на ноль
-        except ZeroDivisionError:
-            self.get_logger().warn("gps_control_frequency_hz is 0, defaulting timer period to 0.2s (5Hz)")
-            self.gps_timer_period = 0.2
-
-
-        # <<< БЛОК ЛОГИРОВАНИЯ ПОЛУЧЕННЫХ ПАРАМЕТРОВ >>>
-        self.get_logger().info(f"--- Retrieved Parameters ---")
-        self.get_logger().info(f"Config file path: {self.get_parameter('config_file').value}") # Логируем и путь к конфигу
-        self.get_logger().info(f"Time at destination duration: {self.time_at_destination_duration} s")
-        self.get_logger().info(f"GPS logging interval: {self.gps_logging_interval} s")
-        self.get_logger().info(f"GPS navigation tolerance: {self.gps_nav_tolerance} m")
-        self.get_logger().info(f"GPS obstacle detection distance: {self.obstacle_detection_distance} m")
-        self.get_logger().info(f"GPS forward speed: {self.forward_speed_gps} m/s")
-        self.get_logger().info(f"GPS turn speed: {self.turn_speed_gps} rad/s")
-        self.get_logger().info(f"GPS control frequency: {gps_control_frequency} Hz")
-        self.get_logger().info(f"Calculated GPS control timer period: {self.gps_timer_period} s")
-        self.get_logger().info(f"----------------------------")
-        self.get_logger().info(f"GPS wait timeout duration: {self.gps_wait_timeout_duration} s")
-        self.get_logger().info(f"Maps storage directory: {self.maps_directory}")
-        # <<< КОНЕЦ БЛОКА ЛОГИРОВАНИЯ ПАРАМЕТРОВ >>>
-
-        # --- Подписки ---
-        self.destination_sub = self.create_subscription(Int32, '/destination_id', self.destination_callback, 10)
-        self.robot_gps_sub = self.create_subscription(NavSatFix, '/robot/gps/fix', self.robot_gps_callback, 10)
-        self.dynamic_gps_sub = self.create_subscription(NavSatFix, '/gps/fix', self.gps_fix_callback, 10) # Для цели 1
-        self.amcl_pose_sub = self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self.amcl_pose_callback, 10)
-        self.heading_sub = self.create_subscription(Float32,'/robot/heading',self.heading_callback,10)
-
-        self.lidar_sub = self.create_subscription(
-            LaserScan,
-            '/scan',
-            self.scan_callback,
-            rclpy.qos.qos_profile_sensor_data) # QoS для сенсоров
-        
-        self.get_logger().info('Subscribed to /destination_id, /robot/gps/fix, /gps/fix (dynamic target 1), /amcl_pose, /scan, /robot/heading')
-
-        # --- Публикации ---
-        self.gps_target_pub = self.create_publisher(NavSatFix, '/gps_target', 10) # Может быть полезно для отладки
-        self.gps_mode_control_pub = self.create_publisher(Bool, '/gps_mode_control', 10) # Индикация режима
-        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.get_logger().info('Created publishers for /gps_target, /gps_mode_control, /cmd_vel')
-
-        # --- Nav2 Action Client ---
-        self._nav_to_pose_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
-        self.get_logger().info('Nav2 NavigateToPose Action Client created')
-        
-        # --- НОВЫЙ КЛИЕНТ СЕРВИСА ДЛЯ СОХРАНЕНИЯ КАРТЫ ---
-        self.save_map_client = self.create_client(SaveMap, '/slam_toolbox/save_map')
-        self.get_logger().info("SaveMap service client for /slam_toolbox/save_map created.")
-
-        # --- Финальная инициализация ---
-        self.get_logger().info('Navigation Manager Node fully initialized.')
-        self.set_state('IDLE')
+            # --- НОВЫЙ ТАЙМЕР ДЛЯ ПОСТОЯННОЙ ПРОВЕРКИ ИСТОЧНИКА GPS ---
+            self.gps_source_check_timer = self.create_timer(self.gps_source_check_period, self._check_gps_source_status)
+            
+            # --- Финальная инициализация ---
+            self.set_state('IDLE')
+            self.get_logger().info('Navigation Manager Node initialized.')
 
     def load_configuration(self):
         config_file_path = self.get_parameter('config_file').get_parameter_value().string_value
@@ -281,17 +254,69 @@ class NavigationManagerNode(Node):
             self.get_logger().warn(f"Destination ID {destination_id_int} not found in configuration. Returning to IDLE.")
             self.set_state('IDLE') # Убедимся, что состояние IDLE
             return
-
+    
         destination_info = self.destinations[dest_key]
         self.current_destination_id = destination_id_int # Сохраняем числовой ID
         self.set_state('PLANNING_NAVIGATION')
         self.start_navigation_to_destination(destination_info)
+    
+    # --- НОВЫЕ И ИЗМЕНЕННЫЕ КОЛЛБЭКИ ДЛЯ ВЫБОРА ИСТОЧНИКА GPS ---
 
+    def robot_hw_gps_callback(self, msg: NavSatFix):
+        """Callback для данных от аппаратного GPS (/robot/gps/fix)."""
+        # Просто обновляем время последнего получения сигнала
+        self.last_hw_gps_time = self.get_clock().now()
+        
+        # Если аппаратный GPS является активным источником, обновляем текущее положение робота
+        if self.active_gps_source == 'HARDWARE':
+            self.current_gps_location = msg
+            # Логирование с троттлингом для уменьшения спама в консоли
+            self.get_logger().info(f"Robot GPS (HW ACTIVE): Lat {msg.latitude:.6f}, Lon {msg.longitude:.6f}",
+                                   throttle_duration_sec=self.gps_logging_interval)
+
+    def robot_mqtt_gps_callback(self, msg: NavSatFix):
+        """Callback для данных от MQTT GPS (/robot/gps/fix_mqtt)."""
+        # MQTT GPS используется только в режиме отката (fallback)
+        if self.active_gps_source == 'MQTT_FALLBACK':
+            self.current_gps_location = msg
+            self.get_logger().info(f"Robot GPS (MQTT FALLBACK): Lat {msg.latitude:.6f}, Lon {msg.longitude:.6f}",
+                                   throttle_duration_sec=self.gps_logging_interval)
+    
+    def _check_gps_source_status(self):
+        """Периодически проверяет, какой источник GPS использовать. Вызывается по таймеру."""
+        now = self.get_clock().now()
+        
+        # Проверяем, есть ли у нас вообще сигнал от аппаратного GPS
+        if self.last_hw_gps_time is None:
+            # Сигнала от аппаратного GPS еще ни разу не было
+            if self.active_gps_source != 'MQTT_FALLBACK':
+                self.get_logger().warn("No signal from hardware GPS since startup. Using MQTT GPS as fallback.")
+                self.active_gps_source = 'MQTT_FALLBACK'
+            return # Выходим, ждем дальше
+
+        # Если сигнал был, проверяем, как давно
+        time_since_last_hw_gps = (now - self.last_hw_gps_time).nanoseconds / 1e9
+
+        if time_since_last_hw_gps <= self.hw_gps_timeout_duration:
+            # Аппаратный GPS работает, используем его
+            if self.active_gps_source != 'HARDWARE':
+                self.get_logger().info(f"Hardware GPS signal is active (last seen {time_since_last_hw_gps:.1f}s ago). Switching to HARDWARE source.")
+                self.active_gps_source = 'HARDWARE'
+        else:
+            # Сигнал от аппаратного GPS пропал
+            if self.active_gps_source != 'MQTT_FALLBACK':
+                self.get_logger().warn(f"Hardware GPS signal lost for {time_since_last_hw_gps:.1f}s. "
+                                       f"Falling back to MQTT GPS.")
+                self.active_gps_source = 'MQTT_FALLBACK'
+    
     # --- Navigation Logic Methods ---
     def set_state(self, new_state):
         if self.current_state != new_state:
             self.get_logger().info(f"State transition: {self.current_state} -> {new_state}")
             self.current_state = new_state
+            state_msg = String()
+            state_msg.data = self.current_state
+            self.state_publisher.publish(state_msg)
 
     def _determine_navigation_parameters(self, target_location_info, is_base_return=False):
         """
@@ -835,35 +860,27 @@ class NavigationManagerNode(Node):
     def stop_navigation(self):
         self.get_logger().info("STOPPING ALL NAVIGATION ACTIVITIES.")
         
-        # 1. Отмена активной цели Nav2
         if self.active_nav2_goal_handle is not None:
-            self.get_logger().info('Attempting to cancel active Nav2 goal.')
-            # Не ждем результата отмены, просто отправляем запрос
+            self.get_logger().info('Cancelling active Nav2 goal.')
             self.active_nav2_goal_handle.cancel_goal_async()
             self.active_nav2_goal_handle = None 
         
-        # 2. Остановка прямого GPS управления (таймер и движение)
-        self._stop_gps_direct_navigation_loop(publish_stop_cmd=True) # Отправит Twist() с нулями
+        self._stop_gps_direct_navigation_loop(publish_stop_cmd=True)
 
-        # 3. Остановка таймера пребывания в пункте назначения
         if self.time_at_destination_timer is not None:
             self.time_at_destination_timer.cancel()
             self.time_at_destination_timer = None
             self.get_logger().info("Cancelled 'time at destination' timer.")
-            # --- НОВОЕ: Остановка таймера ожидания GPS и сброс связанной переменной ---
+
         if self.waiting_for_gps_timeout_timer is not None:
             self.waiting_for_gps_timeout_timer.cancel()
             self.waiting_for_gps_timeout_timer = None
-            self.get_logger().info("Cancelled 'waiting for GPS timeout' timer.")
+            self.get_logger().info("Cancelled 'waiting for dynamic target GPS timeout' timer.")
         
-        self.pending_destination_info_for_gps_wait = None # Сбрасываем сохраненную информацию о цели, которую ждали
-        # --- КОНЕЦ НОВОГО БЛОКА ---
-        # --- НОВОЕ: Сброс флага выполнения картографирования ---
+        self.pending_destination_info_for_gps_wait = None
         self.perform_mapping_for_current_task = False 
-        self.get_logger().info("Mapping flag 'perform_mapping_for_current_task' reset.") # Опциональное логирование
-        # --- КОНЕЦ НОВОГО ДОБАВЛЕНИЯ ---
+        self.get_logger().info("Mapping flag 'perform_mapping_for_current_task' reset.")
 
-        # 4. Сброс состояния и текущей цели
         self.set_state('IDLE')
         self.current_destination_id = None 
         self.get_logger().info("Navigation fully stopped. State set to IDLE.")

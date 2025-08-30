@@ -19,7 +19,8 @@ setup(
     license='TODO: License declaration',
     tests_require=['pytest'],
     entry_points={
-        'console_scripts': ['gps_mqtt_node = gps_mqtt_bridge.gps_mqtt_node:main',
+        'console_scripts': ['gps_mqtt_node = gps_mqtt_bridge.gps_mqtt_node:main','hw_gps_node = gps_mqtt_bridge.hw_gps_node:main',
+
         ],
     },
 )

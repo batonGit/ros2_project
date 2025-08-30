@@ -9,3 +9,4 @@ float32 x_center_norm
 float32 y_center_norm
 float32 width_norm
 float32 height_norm
+float32 distatce_m # дистанция до объекта в метрах

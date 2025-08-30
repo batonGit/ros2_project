@@ -3,13 +3,47 @@
 <head>
     <title>Robot Control Interface</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <style>
         body {
             font-family: Arial, sans-serif;
             text-align: center;
             margin: 0;
             padding: 20px;
+            display: flex;
+            flex-direction: column;
+            height: 95vh;
         }
+        h1, h3 {
+            margin-top: 5px;
+            margin-bottom: 5px;
+        }
+        .main-content {
+            flex-grow: 1;
+        }
+        .manual-controls {
+            flex-shrink: 0;
+            padding-top: 20px;
+            border-top: 1px solid #ccc;
+        }
+        /* --- НОВЫЕ СТИЛИ для панели статуса --- */
+        .status-panel {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 10px;
+            margin: 20px auto;
+            max-width: 500px;
+            text-align: left;
+        }
+        .status-panel p {
+            margin: 5px 0;
+        }
+        .status-panel span {
+            font-family: monospace;
+            font-weight: bold;
+            color: #333;
+        }
+        /* --- КОНЕЦ НОВЫХ СТИЛЕЙ --- */
         .control-pad {
             width: 300px;
             height: 300px;
@@ -17,7 +51,7 @@
             position: relative;
             background-color: #f0f0f0;
             border-radius: 50%;
-            touch-action: none; /* Important for touch devices */
+            touch-action: none;
         }
         .joystick {
             width: 100px;
@@ -25,8 +59,8 @@
             background-color: #007bff;
             border-radius: 50%;
             position: absolute;
-            top: 100px; /* Initial position, will be centered by JS */
-            left: 100px; /* Initial position, will be centered by JS */
+            top: 100px; 
+            left: 100px;
             cursor: pointer;
             z-index: 10;
         }
@@ -34,10 +68,10 @@
             margin-top: 20px;
         }
         .button-row {
-            margin-top: 20px;
-            display: flex; /* For better button alignment */
-            justify-content: center; /* Center buttons in the row */
-            flex-wrap: wrap; /* Allow buttons to wrap on smaller screens */
+            margin-top: 15px;
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
         }
         button {
             padding: 15px 25px;
@@ -52,42 +86,91 @@
         button:active {
             background-color: #0056b3;
         }
+        #stopButton {
+            background-color: #dc3545;
+        }
+        #stopButton:active {
+            background-color: #b02a37;
+        }
     </style>
 </head>
 <body>
     <h1>Robot Control</h1>
     
-    <div class="control-pad" id="controlPad">
-        <div class="joystick" id="joystick"></div>
+    <div class="main-content">
+        <div class="status-panel">
+            <h3 style="text-align: center;">Status</h3>
+            <p><strong>State:</strong> <span id="robot-state">--</span></p>
+            <p><strong>Robot GPS:</strong> Lat <span id="robot-lat">--</span>, Lon <span id="robot-lon">--</span></p>
+            <p><strong>Destination GPS:</strong> Lat <span id="dest-lat">--</span>, Lon <span id="dest-lon">--</span></p>
+        </div>
+        <div class="button-row">
+            <button id="dest1">Destination 1</button>
+            <button id="dest2">Destination 2</button>
+            <button id="dest3">Destination 3</button>
+            <button id="dest4">Destination 4</button>
+        </div>
+        
+        <div class="button-row">
+            <button id="stopButton">STOP</button>
+        </div>
     </div>
-    
-    <div class="info">
-        <p>Linear X: <span id="linearX">0.0</span></p>
-        <p>Angular Z: <span id="angularZ">0.0</span></p>
-    </div>
-    
-    <div class="button-row">
-        <button id="stopButton">STOP</button>
-        <button id="rotateButton">Rotation</button> </div>
- 
-    <div class="button-row">
-         <h3>Destination Points</h3>
-         <button id="dest1">Destination 1</button>
-         <button id="dest2">Destination 2</button>
-         <button id="dest3">Destination 3</button>
-         <button id="dest4">Destination 4</button>
+
+    <div class="manual-controls">
+        <div class="control-pad" id="controlPad">
+            <div class="joystick" id="joystick"></div>
+        </div>
+        
+        <div class="info">
+            <p>Linear X: <span id="linearX">0.0</span></p>
+            <p>Angular Z: <span id="angularZ">0.0</span></p>
+        </div>
+        
+        <div class="button-row">
+            <button id="rotateButton">Rotation</button>
+        </div>
     </div>
    
     <script>
+        // --- НОВЫЙ КОД для WebSocket и обновления статуса ---
+        // Получаем элементы для обновления
+        const robotStateSpan = document.getElementById('robot-state');
+        const robotLatSpan = document.getElementById('robot-lat');
+        const robotLonSpan = document.getElementById('robot-lon');
+        const destLatSpan = document.getElementById('dest-lat');
+        const destLonSpan = document.getElementById('dest-lon');
+
+        // Подключаемся к WebSocket серверу
+        const socket = io();
+
+        socket.on('connect', function() {
+            console.log('Connected to WebSocket server!');
+        });
+
+        // Слушаем событие 'status_update' от сервера
+        socket.on('status_update', function(data) {
+            console.log('Received status update:', data);
+            // Обновляем текст на странице
+            robotStateSpan.textContent = data.state || '--';
+            // toFixed(6) для 6 знаков после запятой у GPS
+            robotLatSpan.textContent = data.robot_lat ? data.robot_lat.toFixed(6) : '--';
+            robotLonSpan.textContent = data.robot_lon ? data.robot_lon.toFixed(6) : '--';
+            destLatSpan.textContent = data.dest_lat ? data.dest_lat.toFixed(6) : '--';
+            destLonSpan.textContent = data.dest_lon ? data.dest_lon.toFixed(6) : '--';
+        });
+        // --- КОНЕЦ НОВОГО КОДА ---
+
+
+        // --- Весь ваш остальной JavaScript код остается здесь без изменений ---
         const controlPad = document.getElementById('controlPad');
         const joystick = document.getElementById('joystick');
         const linearXDisplay = document.getElementById('linearX');
         const angularZDisplay = document.getElementById('angularZ');
         const stopButton = document.getElementById('stopButton');
-        const rotateButton = document.getElementById('rotateButton'); // НОВАЯ ПЕРЕМЕННАЯ ДЛЯ КНОПКИ
+        const rotateButton = document.getElementById('rotateButton');
         
         let isDragging = false;
-        let ctrlRect; // Will be initialized on load/resize
+        let ctrlRect; 
         let centerX;
         let centerY;
         let maxRadius;
@@ -96,32 +179,24 @@
         let angularZ = 0;
         
         function updateJoystickPosition(clientX, clientY) {
-            // Ensure ctrlRect is valid, might not be if called before load/resize
             if (!ctrlRect) return; 
-            
             let relX = clientX - ctrlRect.left - centerX;
             let relY = clientY - ctrlRect.top - centerY;
-            
             let distance = Math.sqrt(relX * relX + relY * relY);
-            
             if (distance > maxRadius) {
                 relX = (relX / distance) * maxRadius;
                 relY = (relY / distance) * maxRadius;
             }
-            
             joystick.style.transform = `translate(${relX}px, ${relY}px)`;
-            
-            linearX = parseFloat((-relY / maxRadius * 0.5).toFixed(2));  // Max 0.5 m/s, forward is negative Y
-            angularZ = parseFloat((-relX / maxRadius * 1.0).toFixed(2)); // Max 1.0 rad/s, left is negative X
-            
+            linearX = parseFloat((-relY / maxRadius * 0.25).toFixed(2));
+            angularZ = parseFloat((-relX / maxRadius * 0.5).toFixed(2));
             linearXDisplay.textContent = linearX;
             angularZDisplay.textContent = angularZ;
-            
             sendCommand(linearX, angularZ);
         }
         
         function resetJoystick() {
-            joystick.style.transform = 'translate(0px, 0px)'; // Reset to center of pad
+            joystick.style.transform = 'translate(0px, 0px)';
             linearX = 0;
             angularZ = 0;
             linearXDisplay.textContent = linearX;
@@ -129,53 +204,35 @@
             sendCommand(linearX, angularZ);
         }
         
-        function sendCommand(lX, aZ) { // Pass values as arguments
+        function sendCommand(lX, aZ) {
             fetch('/control', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     linear_x: lX,
                     angular_z: aZ
                 }),
-            })
-            .then(response => {
-                if (!response.ok) {
-                    console.error('SendCommand response was not ok:', response.statusText);
-                }
-                // No need to parse JSON if Flask returns simple 200 with no body for this endpoint
-            })
-            .catch(error => console.error('Error in sendCommand:', error));
+            }).catch(error => console.error('Error in sendCommand:', error));
         }
 
         function initializeControlPad() {
             ctrlRect = controlPad.getBoundingClientRect();
-            centerX = controlPad.offsetWidth / 2; // Use offsetWidth for dimensions of the element itself
+            centerX = controlPad.offsetWidth / 2;
             centerY = controlPad.offsetHeight / 2;
-            maxRadius = controlPad.offsetWidth / 2 - joystick.offsetWidth / 2; // Max radius for joystick center
-            
-            // Set joystick to the center of the controlPad initially
+            maxRadius = controlPad.offsetWidth / 2 - joystick.offsetWidth / 2;
             joystick.style.left = (centerX - joystick.offsetWidth / 2) + 'px';
             joystick.style.top = (centerY - joystick.offsetHeight / 2) + 'px';
-            resetJoystick(); // Send initial zero command
+            resetJoystick();
         }
         
-        // Mouse events
         controlPad.addEventListener('mousedown', function(e) {
-            if (e.target === joystick || controlPad.contains(e.target)) { // Allow starting drag from pad too
+            if (e.target === joystick || controlPad.contains(e.target)) {
                  isDragging = true;
                  document.body.style.cursor = 'grabbing';
                  updateJoystickPosition(e.clientX, e.clientY);
             }
         });
-        
-        document.addEventListener('mousemove', function(e) {
-            if (isDragging) {
-                updateJoystickPosition(e.clientX, e.clientY);
-            }
-        });
-        
+        document.addEventListener('mousemove', function(e) { if (isDragging) { updateJoystickPosition(e.clientX, e.clientY); } });
         document.addEventListener('mouseup', function() {
             if (isDragging) {
                 isDragging = false;
@@ -184,108 +241,43 @@
             }
         });
         
-        // Touch events
         controlPad.addEventListener('touchstart', function(e) {
             if (e.target === joystick || controlPad.contains(e.target)) {
-                e.preventDefault(); // Prevent page scrolling
+                e.preventDefault();
                 isDragging = true;
                 updateJoystickPosition(e.touches[0].clientX, e.touches[0].clientY);
             }
-        }, { passive: false }); // passive: false for preventDefault
-        
-        document.addEventListener('touchmove', function(e) {
-            if (isDragging) {
-                e.preventDefault();
-                updateJoystickPosition(e.touches[0].clientX, e.touches[0].clientY);
-            }
         }, { passive: false });
+        document.addEventListener('touchmove', function(e) {
+            if (isDragging) { e.preventDefault(); updateJoystickPosition(e.touches[0].clientX, e.touches[0].clientY); }
+        }, { passive: false });
+        document.addEventListener('touchend', function(e) { if (isDragging) { isDragging = false; resetJoystick(); } });
         
-        document.addEventListener('touchend', function(e) {
-            if (isDragging) {
-                isDragging = false;
-                resetJoystick();
-            }
-        });
-        
-        // Stop button
         stopButton.addEventListener('click', function() {
             resetJoystick(); 
-            fetch('/set_destination', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    destination_id: 0 
-                }),
-            })
-            .then(response => {
-                if (!response.ok) {
-                    console.error('Stop command (dest_id:0) response was not ok:', response.statusText);
-                    return response.json().then(errData => Promise.reject(errData));
-                }
-                return response.json();
-            })
-            .then(data => {
-                console.log('Stop command (destination_id: 0) sent successfully:', data);
-            })
-            .catch((error) => {
-                console.error('Error sending stop command (destination_id: 0):', error);
-            });
+            sendDestination(0);
         });
 
-        // --- НОВЫЙ ОБРАБОТЧИК ДЛЯ КНОПКИ "Rotation" ---
         rotateButton.addEventListener('click', function() {
             console.log('Rotation button clicked');
-            const angularVelocityForRotation = -1.0; // Для steer = -90 (по часовой стрелке)
-            const minimalLinearXForRotation = 0.08; // Маленькая скорость вперед, попробуйте 0.01, 0.02 или 0.03                                         // Отрицательное значение для вращения по часовой стрелке
-                                                      // Можете изменить это значение для другой скорости вращения.
-
-            // Обновляем отображение на странице для команды вращения
-            linearXDisplay.textContent = "0.00"; // Явное указание
-            angularZDisplay.textContent = angularVelocityForRotation.toFixed(2); // Отображаем значение
-
-            // Отправляем команду на сервер
-            fetch('/control', { 
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    linear_x: minimalLinearXForRotation, // Маленькая скорость вперед 
-                    angular_z: angularVelocityForRotation 
-                }),
-            })
-            .then(response => {
-                if (!response.ok) {
-                    console.error('Rotation command response was not ok:', response.statusText);
-                }
-                // Обычно /control не возвращает JSON тело при успехе, так что response.json() может вызвать ошибку
-                // Если Flask возвращает jsonify({'status': 'success'}), то response.json() нужен.
-                // Я убрал .then(response => response.json()) для простоты, если /control не шлет JSON в ответ.
-            })
-            .then(data => { // Этот .then(data) может не выполниться или data будет undefined, если нет JSON ответа
-                console.log('Rotation command acknowledged by server.');
-            })
-            .catch((error) => {
-                console.error('Error sending rotation command:', error);
-            });
+            const angularVelocityForRotation = -0.8;
+            const minimalLinearXForRotation = 0.02; 
+            linearXDisplay.textContent = minimalLinearXForRotation.toFixed(2);
+            angularZDisplay.textContent = angularVelocityForRotation.toFixed(2);
+            sendCommand(minimalLinearXForRotation, angularVelocityForRotation);
         });
-        // --- КОНЕЦ НОВОГО ОБРАБОТЧИКА ---
         
-        // Initial joystick and control pad setup
         window.addEventListener('load', initializeControlPad);
         window.addEventListener('resize', initializeControlPad);
 
-        // Destination buttons helper function
         function sendDestination(id) {
             console.log(`Sending destination_id: ${id}`);
             fetch('/set_destination', {
                method: 'POST',
-               headers: { 'Content-Type': 'application/json', },
+               headers: { 'Content-Type': 'application/json' },
                body: JSON.stringify({ destination_id: id }),
             })
-            .then(response => response.json()) // Предполагаем, что /set_destination возвращает JSON
+            .then(response => response.json())
             .then(data => console.log(`Destination ${id} command acknowledged:`, data))
             .catch(error => console.error(`Error sending destination ${id}:`, error));
         }
