@@ -14,35 +14,49 @@ class GPSMQTTNode(Node):
             reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST,
             durability=DurabilityPolicy.VOLATILE, depth=1)
 
-        # Публикуем ТОЛЬКО координаты пункта назначения
+        # Публикатор для координат пункта назначения (остается без изменений)
         self.dest_publisher_ = self.create_publisher(NavSatFix, '/gps/fix', qos_profile)
+        
+        # --- ИЗМЕНЕНИЕ: Добавляем обратно публикатор для GPS с телефона тележки, но в новый топик ---
+        self.robot_mqtt_publisher_ = self.create_publisher(NavSatFix, '/robot/gps/fix_mqtt', qos_profile)
 
-        # Клиент ТОЛЬКО для пункта назначения
+        # Клиент для пункта назначения
         self.dest_mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
-        # Укажите ваши реальные логин/пароль, если они нужны
-        self.dest_mqtt_client.username_pw_set("my_mqtt", "Hnw8dbbhw") 
+        self.dest_mqtt_client.username_pw_set("my_mqtt", "Hnw8dbbhw") # Убедитесь, что данные верны
         self.dest_mqtt_client.on_connect = self.on_dest_connect
         self.dest_mqtt_client.on_message = self.on_dest_message
-        self.dest_mqtt_client.on_disconnect = lambda client, userdata, rc: self.get_logger().warn(f"Destination MQTT client disconnected with result code: {rc}")
+        self.dest_mqtt_client.on_disconnect = lambda client, userdata, rc: self.get_logger().warn(f"Destination MQTT client disconnected with code: {rc}")
         try:
-            self.dest_mqtt_client.connect("megalitour.ru", 1883, 60) # Укажите ваш брокер
+            self.dest_mqtt_client.connect("megalitour.ru", 1883, 60)
             self.dest_mqtt_client.loop_start()
-            self.get_logger().info("Destination-only MQTT client loop started.")
+            self.get_logger().info("Destination MQTT client loop started.")
         except Exception as e:
             self.get_logger().error(f"Failed to connect destination MQTT client: {e}")
 
+        # --- ИЗМЕНЕНИЕ: Возвращаем MQTT клиент для GPS тележки ---
+        self.robot_mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+        self.robot_mqtt_client.username_pw_set("gps_robot", "Hnw8dbbhw") # Убедитесь, что данные верны
+        self.robot_mqtt_client.on_connect = self.on_robot_connect
+        self.robot_mqtt_client.on_message = self.on_robot_message
+        self.robot_mqtt_client.on_disconnect = lambda client, userdata, rc: self.get_logger().warn(f"Robot MQTT client disconnected with code: {rc}")
+        try:
+            self.robot_mqtt_client.connect("megalitour.ru", 1883, 60)
+            self.robot_mqtt_client.loop_start()
+            self.get_logger().info("Robot MQTT client loop started.")
+        except Exception as e:
+            self.get_logger().error(f"Failed to connect robot MQTT client: {e}")
+        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
+    # ... (методы on_dest_connect, process_mqtt_message, on_dest_message остаются без изменений) ...
     def on_dest_connect(self, client, userdata, flags, rc):
         if rc == 0:
             self.get_logger().info("Successfully connected to MQTT broker for destination.")
-            client.subscribe("owntracks/my_mqtt/hncrtm1") # Укажите ваш топик назначения
-            self.get_logger().info("Subscribed to destination topic.")
+            client.subscribe("owntracks/my_mqtt/hncrtm1") 
+            self.get_logger().info("Subscribed to owntracks/my_mqtt/hncrtm1 for destination.")
         else:
             self.get_logger().error(f"Failed to connect to MQTT broker for destination, return code {rc}")
-
-    # Метод process_mqtt_message остается таким же, как был
+    
     def process_mqtt_message(self, payload_str, topic_name, frame_id_prefix="gps_link"):
-        # ... (скопируйте ваш существующий метод process_mqtt_message сюда) ...
-        # ... (я не буду его здесь повторять для краткости, он у вас уже есть) ...
         try: data = json.loads(payload_str)
         except json.JSONDecodeError as e: self.get_logger().error(f"JSON Decode Error: {e}"); return None
         if data.get("_type") != "location": return None
@@ -66,18 +80,37 @@ class GPSMQTTNode(Node):
             gps_msg.position_covariance_type = NavSatFix.COVARIANCE_TYPE_UNKNOWN
         return gps_msg
 
-
     def on_dest_message(self, client, userdata, msg):
         gps_msg = self.process_mqtt_message(msg.payload.decode(), msg.topic, "destination_gps_antenna")
         if gps_msg:
             self.dest_publisher_.publish(gps_msg)
             self.get_logger().info(f"Published to /gps/fix (Dest): Lat {gps_msg.latitude:.5f}, Lon {gps_msg.longitude:.5f}")
 
+    # --- ИЗМЕНЕНИЕ: Возвращаем логику для GPS тележки ---
+    def on_robot_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            self.get_logger().info("Successfully connected to MQTT broker for robot.")
+            client.subscribe("owntracks/gps_robot/hwhryh") # Убедитесь, что топик верный
+            self.get_logger().info("Subscribed to owntracks/gps_robot/hwhryh for robot.")
+        else:
+            self.get_logger().error(f"Failed to connect to MQTT broker for robot, return code {rc}")
+
+    def on_robot_message(self, client, userdata, msg):
+        gps_msg = self.process_mqtt_message(msg.payload.decode(), msg.topic, "robot_gps_mqtt")
+        if gps_msg:
+            self.robot_mqtt_publisher_.publish(gps_msg) # Публикуем в /robot/gps/fix_mqtt
+            self.get_logger().info(f"Published to /robot/gps/fix_mqtt (Robot): Lat {gps_msg.latitude:.5f}, Lon {gps_msg.longitude:.5f}")
+    # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
     def destroy_node(self):
-        self.get_logger().info("Stopping MQTT client loop.")
+        self.get_logger().info("Stopping MQTT client loops and shutting down GPSMQTTNode.")
         if self.dest_mqtt_client:
             self.dest_mqtt_client.loop_stop()
             self.dest_mqtt_client.disconnect()
+        # --- ИЗМЕНЕНИЕ: Добавляем остановку для клиента робота ---
+        if self.robot_mqtt_client:
+            self.robot_mqtt_client.loop_stop()
+            self.robot_mqtt_client.disconnect()
         super().destroy_node()
 
 def main():
