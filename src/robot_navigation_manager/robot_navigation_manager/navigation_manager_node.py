@@ -103,6 +103,8 @@ class NavigationManagerNode(Node):
             self.save_map_client = self.create_client(SaveMap, '/slam_toolbox/save_map')
             self.get_logger().info("Publishers and action/service clients created.")
             self.state_publisher = self.create_publisher(String, '/robot_status', 10)
+            self.current_gps_publisher = self.create_publisher(NavSatFix, '/robot/gps/current', 10)
+            self.get_logger().info("Publisher for current robot GPS created on /robot/gps/current.")
 
             # --- НОВЫЙ ТАЙМЕР ДЛЯ ПОСТОЯННОЙ ПРОВЕРКИ ИСТОЧНИКА GPS ---
             self.gps_source_check_timer = self.create_timer(self.gps_source_check_period, self._check_gps_source_status)
@@ -264,12 +266,16 @@ class NavigationManagerNode(Node):
 
     def robot_hw_gps_callback(self, msg: NavSatFix):
         """Callback для данных от аппаратного GPS (/robot/gps/fix)."""
-        # Просто обновляем время последнего получения сигнала
+        # Обновляем время последнего получения сигнала от аппаратного модуля.
+        # Это действие должно происходить всегда, когда приходит сообщение,
+        # чтобы наш фоновый таймер знал, что модуль активен.
         self.last_hw_gps_time = self.get_clock().now()
         
-        # Если аппаратный GPS является активным источником, обновляем текущее положение робота
+        # Если аппаратный GPS является активным источником, то мы используем его данные.
         if self.active_gps_source == 'HARDWARE':
             self.current_gps_location = msg
+            # Публикуем "официальные" текущие координаты для других узлов (например, web_server)
+            self.current_gps_publisher.publish(self.current_gps_location)
             # Логирование с троттлингом для уменьшения спама в консоли
             self.get_logger().info(f"Robot GPS (HW ACTIVE): Lat {msg.latitude:.6f}, Lon {msg.longitude:.6f}",
                                    throttle_duration_sec=self.gps_logging_interval)
@@ -281,6 +287,7 @@ class NavigationManagerNode(Node):
             self.current_gps_location = msg
             self.get_logger().info(f"Robot GPS (MQTT FALLBACK): Lat {msg.latitude:.6f}, Lon {msg.longitude:.6f}",
                                    throttle_duration_sec=self.gps_logging_interval)
+            self.current_gps_publisher.publish(self.current_gps_location)
     
     def _check_gps_source_status(self):
         """Периодически проверяет, какой источник GPS использовать. Вызывается по таймеру."""

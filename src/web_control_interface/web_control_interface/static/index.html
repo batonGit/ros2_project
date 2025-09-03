@@ -13,45 +13,77 @@
             display: flex;
             flex-direction: column;
             height: 95vh;
+            background-color: #f4f4f9;
         }
         h1, h3 {
             margin-top: 5px;
             margin-bottom: 5px;
+            color: #333;
         }
         .main-content {
             flex-grow: 1;
+            display: flex;
+            flex-direction: column;
         }
         .manual-controls {
             flex-shrink: 0;
             padding-top: 20px;
             border-top: 1px solid #ccc;
+            margin-top: 20px;
         }
-        /* --- НОВЫЕ СТИЛИ для панели статуса --- */
         .status-panel {
             border: 1px solid #ddd;
             border-radius: 8px;
-            padding: 10px;
-            margin: 20px auto;
+            padding: 10px 15px;
+            margin: 10px auto;
             max-width: 500px;
             text-align: left;
+            background-color: #fff;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
         .status-panel p {
-            margin: 5px 0;
+            margin: 8px 0;
+            font-size: 14px;
         }
         .status-panel span {
             font-family: monospace;
             font-weight: bold;
-            color: #333;
+            color: #0056b3;
+            background-color: #e9ecef;
+            padding: 2px 4px;
+            border-radius: 4px;
         }
-        /* --- КОНЕЦ НОВЫХ СТИЛЕЙ --- */
+        .map-controls {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #ccc;
+        }
+        #map-selector {
+            font-size: 16px;
+            padding: 10px;
+            min-width: 200px;
+            margin-right: 10px;
+        }
+        #map-canvas {
+            border: 1px solid black;
+            margin-top: 15px;
+            width: 95%; /* <-- Устанавливаем ширину в 95% от доступного пространства */
+            height: auto; /* <-- Высота будет подбираться автоматически для сохранения пропорций */
+            margin-left: auto; /* <-- Эти два правила центрируют карту */
+            margin-right: auto;
+            display: none; /* Изначально скрыт, как и было */
+            cursor: crosshair;
+            background-color: #fff;
+        }
         .control-pad {
             width: 300px;
             height: 300px;
             margin: 0 auto;
             position: relative;
-            background-color: #f0f0f0;
+            background-color: #e9ecef;
             border-radius: 50%;
             touch-action: none;
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.2);
         }
         .joystick {
             width: 100px;
@@ -63,15 +95,18 @@
             left: 100px;
             cursor: pointer;
             z-index: 10;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.3);
         }
         .info {
             margin-top: 20px;
+            font-family: monospace;
         }
         .button-row {
             margin-top: 15px;
             display: flex;
             justify-content: center;
             flex-wrap: wrap;
+            align-items: center;
         }
         button {
             padding: 15px 25px;
@@ -82,6 +117,10 @@
             border: none;
             border-radius: 5px;
             cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            opacity: 0.9;
         }
         button:active {
             background-color: #0056b3;
@@ -91,6 +130,13 @@
         }
         #stopButton:active {
             background-color: #b02a37;
+        }
+        #map-start-button {
+            background-color: #28a745;
+            display: none; /* Изначально скрыта */
+        }
+        #map-start-button:active {
+            background-color: #218838;
         }
     </style>
 </head>
@@ -104,6 +150,7 @@
             <p><strong>Robot GPS:</strong> Lat <span id="robot-lat">--</span>, Lon <span id="robot-lon">--</span></p>
             <p><strong>Destination GPS:</strong> Lat <span id="dest-lat">--</span>, Lon <span id="dest-lon">--</span></p>
         </div>
+
         <div class="button-row">
             <button id="dest1">Destination 1</button>
             <button id="dest2">Destination 2</button>
@@ -114,6 +161,17 @@
         <div class="button-row">
             <button id="stopButton">STOP</button>
         </div>
+        
+        <div class="map-controls">
+            <h3>Map Navigation</h3>
+            <div class="button-row">
+                <select id="map-selector">
+                    <option value="">-- Select a Map --</option>
+                </select>
+                <button id="map-start-button">START</button>
+            </div>
+            <canvas id="map-canvas" style="display: none;"></canvas>
+        </div>
     </div>
 
     <div class="manual-controls">
@@ -122,64 +180,101 @@
         </div>
         
         <div class="info">
-            <p>Linear X: <span id="linearX">0.0</span></p>
-            <p>Angular Z: <span id="angularZ">0.0</span></p>
+            <p>Linear X: <span id="linearX">0.00</span></p>
+            <p>Angular Z: <span id="angularZ">0.00</span></p>
         </div>
         
         <div class="button-row">
             <button id="rotateButton">Rotation</button>
         </div>
     </div>
-   
+    
     <script>
-        // --- НОВЫЙ КОД для WebSocket и обновления статуса ---
-        // Получаем элементы для обновления
+        // --- ОБЪЯВЛЕНИЕ ВСЕХ КОНСТАНТ ---
         const robotStateSpan = document.getElementById('robot-state');
         const robotLatSpan = document.getElementById('robot-lat');
         const robotLonSpan = document.getElementById('robot-lon');
         const destLatSpan = document.getElementById('dest-lat');
         const destLonSpan = document.getElementById('dest-lon');
-
-        // Подключаемся к WebSocket серверу
-        const socket = io();
-
-        socket.on('connect', function() {
-            console.log('Connected to WebSocket server!');
-        });
-
-        // Слушаем событие 'status_update' от сервера
-        socket.on('status_update', function(data) {
-            console.log('Received status update:', data);
-            // Обновляем текст на странице
-            robotStateSpan.textContent = data.state || '--';
-            // toFixed(6) для 6 знаков после запятой у GPS
-            robotLatSpan.textContent = data.robot_lat ? data.robot_lat.toFixed(6) : '--';
-            robotLonSpan.textContent = data.robot_lon ? data.robot_lon.toFixed(6) : '--';
-            destLatSpan.textContent = data.dest_lat ? data.dest_lat.toFixed(6) : '--';
-            destLonSpan.textContent = data.dest_lon ? data.dest_lon.toFixed(6) : '--';
-        });
-        // --- КОНЕЦ НОВОГО КОДА ---
-
-
-        // --- Весь ваш остальной JavaScript код остается здесь без изменений ---
         const controlPad = document.getElementById('controlPad');
         const joystick = document.getElementById('joystick');
         const linearXDisplay = document.getElementById('linearX');
         const angularZDisplay = document.getElementById('angularZ');
         const stopButton = document.getElementById('stopButton');
         const rotateButton = document.getElementById('rotateButton');
-        
+        const mapSelector = document.getElementById('map-selector');
+        const mapCanvas = document.getElementById('map-canvas');
+        const mapContext = mapCanvas.getContext('2d');
+        const mapStartButton = document.getElementById('map-start-button');
+
+        // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
         let isDragging = false;
-        let ctrlRect; 
-        let centerX;
-        let centerY;
-        let maxRadius;
+        let ctrlRect, centerX, centerY, maxRadius;
+        let linearX = 0, angularZ = 0;
+        let currentMapImage = new Image();
+        let targetMarker = null; // {x, y}
+
+        // --- ЛОГИКА WEBSOCKET ---
+        const socket = io();
+        socket.on('connect', () => console.log('Connected to WebSocket server!'));
+        socket.on('status_update', (data) => {
+            robotStateSpan.textContent = data.state || '--';
+            robotLatSpan.textContent = data.robot_lat ? data.robot_lat.toFixed(6) : '--';
+            robotLonSpan.textContent = data.robot_lon ? data.robot_lon.toFixed(6) : '--';
+            destLatSpan.textContent = data.dest_lat ? data.dest_lat.toFixed(6) : '--';
+            destLonSpan.textContent = data.dest_lon ? data.dest_lon.toFixed(6) : '--';
+        });
+
+        // --- ЛОГИКА КАРТЫ ---
+        async function loadMapList() {
+            try {
+                const response = await fetch('/api/maps');
+                if (!response.ok) throw new Error(`Server responded with ${response.status}`);
+                const mapNames = await response.json();
+                mapSelector.innerHTML = '<option value="">-- Select a Map --</option>';
+                mapNames.forEach(name => {
+                    const option = document.createElement('option');
+                    option.value = name;
+                    option.textContent = name;
+                    mapSelector.appendChild(option);
+                });
+            } catch (error) { console.error('Failed to load map list:', error); }
+        }
+
+        function drawMap() {
+            if (!currentMapImage.src || !currentMapImage.complete) return;
+            mapContext.drawImage(currentMapImage, 0, 0);
+            if (targetMarker) {
+                mapContext.beginPath();
+                mapContext.arc(targetMarker.x, targetMarker.y, 5, 0, 2 * Math.PI, false);
+                mapContext.fillStyle = 'red';
+                mapContext.fill();
+                mapContext.lineWidth = 2;
+                mapContext.strokeStyle = 'darkred';
+                mapContext.stroke();
+            }
+        }
+
+        function loadAndDrawMap(mapName) {
+            const imageUrl = `/api/map_image/${mapName}`;
+            currentMapImage.src = imageUrl;
+            currentMapImage.onload = () => {
+                mapCanvas.width = currentMapImage.width;
+                mapCanvas.height = currentMapImage.height;
+                targetMarker = null;
+                mapStartButton.style.display = 'none';
+                drawMap();
+                mapCanvas.style.display = 'block';
+            };
+            currentMapImage.onerror = () => {
+                console.error(`Failed to load map image for '${mapName}'.`);
+                mapCanvas.style.display = 'none';
+            };
+        }
         
-        let linearX = 0;
-        let angularZ = 0;
-        
+        // --- ФУНКЦИИ ДЖОЙСТИКА ---
         function updateJoystickPosition(clientX, clientY) {
-            if (!ctrlRect) return; 
+            if (!ctrlRect) return;
             let relX = clientX - ctrlRect.left - centerX;
             let relY = clientY - ctrlRect.top - centerY;
             let distance = Math.sqrt(relX * relX + relY * relY);
@@ -190,17 +285,16 @@
             joystick.style.transform = `translate(${relX}px, ${relY}px)`;
             linearX = parseFloat((-relY / maxRadius * 0.25).toFixed(2));
             angularZ = parseFloat((-relX / maxRadius * 0.5).toFixed(2));
-            linearXDisplay.textContent = linearX;
-            angularZDisplay.textContent = angularZ;
+            linearXDisplay.textContent = linearX.toFixed(2);
+            angularZDisplay.textContent = angularZ.toFixed(2);
             sendCommand(linearX, angularZ);
         }
         
         function resetJoystick() {
             joystick.style.transform = 'translate(0px, 0px)';
-            linearX = 0;
-            angularZ = 0;
-            linearXDisplay.textContent = linearX;
-            angularZDisplay.textContent = angularZ;
+            linearX = 0; angularZ = 0;
+            linearXDisplay.textContent = linearX.toFixed(2);
+            angularZDisplay.textContent = angularZ.toFixed(2);
             sendCommand(linearX, angularZ);
         }
         
@@ -208,10 +302,7 @@
             fetch('/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    linear_x: lX,
-                    angular_z: aZ
-                }),
+                body: JSON.stringify({ linear_x: lX, angular_z: aZ }),
             }).catch(error => console.error('Error in sendCommand:', error));
         }
 
@@ -225,15 +316,16 @@
             resetJoystick();
         }
         
-        controlPad.addEventListener('mousedown', function(e) {
+        // --- ОБРАБОТЧИКИ СОБЫТИЙ ---
+        controlPad.addEventListener('mousedown', (e) => {
             if (e.target === joystick || controlPad.contains(e.target)) {
                  isDragging = true;
                  document.body.style.cursor = 'grabbing';
                  updateJoystickPosition(e.clientX, e.clientY);
             }
         });
-        document.addEventListener('mousemove', function(e) { if (isDragging) { updateJoystickPosition(e.clientX, e.clientY); } });
-        document.addEventListener('mouseup', function() {
+        document.addEventListener('mousemove', (e) => { if (isDragging) updateJoystickPosition(e.clientX, e.clientY); });
+        document.addEventListener('mouseup', () => {
             if (isDragging) {
                 isDragging = false;
                 document.body.style.cursor = 'default';
@@ -241,35 +333,57 @@
             }
         });
         
-        controlPad.addEventListener('touchstart', function(e) {
+        controlPad.addEventListener('touchstart', (e) => {
             if (e.target === joystick || controlPad.contains(e.target)) {
-                e.preventDefault();
-                isDragging = true;
+                e.preventDefault(); isDragging = true;
                 updateJoystickPosition(e.touches[0].clientX, e.touches[0].clientY);
             }
         }, { passive: false });
-        document.addEventListener('touchmove', function(e) {
+        document.addEventListener('touchmove', (e) => {
             if (isDragging) { e.preventDefault(); updateJoystickPosition(e.touches[0].clientX, e.touches[0].clientY); }
         }, { passive: false });
-        document.addEventListener('touchend', function(e) { if (isDragging) { isDragging = false; resetJoystick(); } });
+        document.addEventListener('touchend', () => { if (isDragging) { isDragging = false; resetJoystick(); } });
         
-        stopButton.addEventListener('click', function() {
-            resetJoystick(); 
-            sendDestination(0);
-        });
+        stopButton.addEventListener('click', () => { resetJoystick(); sendDestination(0); });
 
-        rotateButton.addEventListener('click', function() {
-            console.log('Rotation button clicked');
+        rotateButton.addEventListener('click', () => {
             const angularVelocityForRotation = -0.8;
             const minimalLinearXForRotation = 0.02; 
             linearXDisplay.textContent = minimalLinearXForRotation.toFixed(2);
             angularZDisplay.textContent = angularVelocityForRotation.toFixed(2);
             sendCommand(minimalLinearXForRotation, angularVelocityForRotation);
         });
-        
-        window.addEventListener('load', initializeControlPad);
-        window.addEventListener('resize', initializeControlPad);
 
+        mapSelector.addEventListener('change', function() {
+            const selectedMap = this.value;
+            if (selectedMap) { loadAndDrawMap(selectedMap); } 
+            else {
+                mapCanvas.style.display = 'none';
+                mapStartButton.style.display = 'none';
+                targetMarker = null;
+            }
+        });
+
+        mapCanvas.addEventListener('click', function(e) {
+            const rect = mapCanvas.getBoundingClientRect();
+            const scaleX = mapCanvas.width / rect.width;
+            const scaleY = mapCanvas.height / rect.height;
+            const x = (e.clientX - rect.left) * scaleX;
+            const y = (e.clientY - rect.top) * scaleY;
+            targetMarker = { x: x, y: y };
+            console.log(`New map target set at pixel coords: X=${x.toFixed(0)}, Y=${y.toFixed(0)}`);
+            drawMap();
+            mapStartButton.style.display = 'inline-block';
+        });
+
+        mapStartButton.addEventListener('click', function() {
+            if (!targetMarker) { alert("Please select a point on the map first!"); return; }
+            const selectedMap = mapSelector.value;
+            if (!selectedMap) { alert("Please select a map from the dropdown list!"); return; }
+            console.log(`START clicked for map '${selectedMap}' with target at X=${targetMarker.x.toFixed(0)}, Y=${targetMarker.y.toFixed(0)}`);
+            alert(`Navigation to point (X=${targetMarker.x.toFixed(0)}, Y=${targetMarker.y.toFixed(0)}) on map '${selectedMap}' is not yet implemented.`);
+        });
+        
         function sendDestination(id) {
             console.log(`Sending destination_id: ${id}`);
             fetch('/set_destination', {
@@ -282,10 +396,17 @@
             .catch(error => console.error(`Error sending destination ${id}:`, error));
         }
 
-        document.getElementById('dest1').addEventListener('click', function() { sendDestination(1); });
-        document.getElementById('dest2').addEventListener('click', function() { sendDestination(2); });
-        document.getElementById('dest3').addEventListener('click', function() { sendDestination(3); });
-        document.getElementById('dest4').addEventListener('click', function() { sendDestination(4); });
+        document.getElementById('dest1').addEventListener('click', () => sendDestination(1));
+        document.getElementById('dest2').addEventListener('click', () => sendDestination(2));
+        document.getElementById('dest3').addEventListener('click', () => sendDestination(3));
+        document.getElementById('dest4').addEventListener('click', () => sendDestination(4));
+
+        // --- ИНИЦИАЛИЗАЦИЯ ПРИ ЗАГРУЗКЕ ---
+        window.addEventListener('load', () => {
+            initializeControlPad();
+            loadMapList();
+        });
+        window.addEventListener('resize', initializeControlPad);
     </script>
 </body>
 </html>
